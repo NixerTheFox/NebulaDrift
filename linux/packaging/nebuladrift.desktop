@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nebula Drift
+GenericName=Audio Visualizer
+Comment=Fly through space while the music drives stars, nebulae, galaxies and black holes
+Exec=nebuladrift %f
+Icon=nebuladrift
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=visualizer;visualiser;music;space;nebula;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/ogg;audio/x-vorbis+ogg;
+StartupWMClass=nebuladrift
