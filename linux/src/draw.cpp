@@ -122,11 +122,14 @@ static void blurA8(unsigned char* data, int w, int h, int stride, double sigma) 
     }
 }
 
-void withShadow(cairo_t* c, double dx, double dy, double blur, RGBA color, const std::function<void(cairo_t*)>& body) {
+static double matrixScale(const cairo_matrix_t& m) { return std::sqrt(std::fabs(m.xx * m.yy - m.xy * m.yx)); }
+
+/// Renders `body` as coverage into an A8 surface and blurs it. Returns null if it drew nothing;
+/// `x0`, `y0` is where the mask goes in device space (before the shadow offset).
+static cairo_surface_t* shadowMask(cairo_t* c, double blur, const std::function<void(cairo_t*)>& body, int& x0,
+                                   int& y0) {
     cairo_matrix_t m;
     cairo_get_matrix(c, &m);
-    double scale = std::sqrt(std::fabs(m.xx * m.yy - m.xy * m.yx));
-
     cairo_surface_t* rec = cairo_recording_surface_create(CAIRO_CONTENT_COLOR_ALPHA, nullptr);
     cairo_t* rc = cairo_create(rec);
     cairo_set_matrix(rc, &m);
@@ -135,12 +138,14 @@ void withShadow(cairo_t* c, double dx, double dy, double blur, RGBA color, const
 
     double ix, iy, iw, ih;
     cairo_recording_surface_ink_extents(rec, &ix, &iy, &iw, &ih);
-    if (iw > 0 && ih > 0 && color.a > 0) {
-        double sigma = blur * scale / 2;
+    cairo_surface_t* mask = nullptr;
+    if (iw > 0 && ih > 0) {
+        double sigma = blur * matrixScale(m) / 2;
         int pad = int(std::ceil(sigma * 3)) + 2;
-        int x0 = int(std::floor(ix)) - pad, y0 = int(std::floor(iy)) - pad;
+        x0 = int(std::floor(ix)) - pad;
+        y0 = int(std::floor(iy)) - pad;
         int w = int(std::ceil(ix + iw)) + pad - x0, h = int(std::ceil(iy + ih)) + pad - y0;
-        cairo_surface_t* mask = cairo_image_surface_create(CAIRO_FORMAT_A8, w, h);
+        mask = cairo_image_surface_create(CAIRO_FORMAT_A8, w, h);
         cairo_t* mc = cairo_create(mask);
         cairo_set_source_surface(mc, rec, -x0, -y0);
         cairo_paint(mc);
@@ -148,19 +153,67 @@ void withShadow(cairo_t* c, double dx, double dy, double blur, RGBA color, const
         cairo_surface_flush(mask);
         blurA8(cairo_image_surface_get_data(mask), w, h, cairo_image_surface_get_stride(mask), sigma);
         cairo_surface_mark_dirty(mask);
-        cairo_save(c);
-        cairo_identity_matrix(c);
-        setColor(c, color);
-        cairo_mask_surface(c, mask, x0 + dx * scale, y0 + dy * scale);
-        cairo_restore(c);
-        cairo_surface_destroy(mask);
     }
+    cairo_surface_destroy(rec);
+    return mask;
+}
+
+static void paintShadow(cairo_t* c, cairo_surface_t* mask, double x, double y, RGBA color) {
     cairo_save(c);
     cairo_identity_matrix(c);
-    cairo_set_source_surface(c, rec, 0, 0);
-    cairo_paint(c);
+    setColor(c, color);
+    cairo_mask_surface(c, mask, std::round(x), std::round(y));
     cairo_restore(c);
-    cairo_surface_destroy(rec);
+}
+
+/// Draws the content itself directly: replaying a recording onto the target is far slower.
+static void drawBody(cairo_t* c, const std::function<void(cairo_t*)>& body) {
+    cairo_save(c);
+    body(c);
+    cairo_restore(c);
+}
+
+void withShadow(cairo_t* c, double dx, double dy, double blur, RGBA color, const std::function<void(cairo_t*)>& body) {
+    if (color.a > 0) {
+        int x0, y0;
+        if (cairo_surface_t* mask = shadowMask(c, blur, body, x0, y0)) {
+            cairo_matrix_t m;
+            cairo_get_matrix(c, &m);
+            double scale = matrixScale(m);
+            paintShadow(c, mask, x0 + dx * scale, y0 + dy * scale, color);
+            cairo_surface_destroy(mask);
+        }
+    }
+    drawBody(c, body);
+}
+
+void ShadowCache::clear() {
+    for (auto& [key, e] : entries) cairo_surface_destroy(e.mask);
+    entries.clear();
+}
+
+void withCachedShadow(cairo_t* c, ShadowCache& cache, long key, Pt anchor, double contentAlpha, double dx, double dy,
+                      double blur, RGBA color, const std::function<void(cairo_t*)>& body) {
+    double ax = anchor.x, ay = anchor.y;
+    cairo_user_to_device(c, &ax, &ay);
+    auto it = cache.entries.find(key);
+    if (it == cache.entries.end() && contentAlpha > 0.001) {
+        int x0, y0;
+        if (cairo_surface_t* mask = shadowMask(c, blur, body, x0, y0)) {
+            it = cache.entries.emplace(key, ShadowCache::Entry{mask, x0 - ax, y0 - ay, contentAlpha}).first;
+        }
+    }
+    if (it != cache.entries.end() && color.a > 0) {
+        const ShadowCache::Entry& e = it->second;
+        cairo_matrix_t m;
+        cairo_get_matrix(c, &m);
+        double scale = matrixScale(m);
+        // The shadow is as opaque as the content casting it.
+        RGBA k = color;
+        k.a *= contentAlpha / e.alpha;
+        paintShadow(c, e.mask, ax + e.offX + dx * scale, ay + e.offY + dy * scale, k);
+    }
+    drawBody(c, body);
 }
 
 // MARK: - Text

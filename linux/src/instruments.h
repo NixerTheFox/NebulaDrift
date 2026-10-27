@@ -76,6 +76,15 @@ private:
 
     void drawStatic(cairo_t* c, const Layout& l, double width);
     void drawDynamic(cairo_t* c, const Layout& l);
+    void drawFronts(cairo_t* c, const Layout& l);
+    /// Makes a patch of the static panel over `r`, inside `shape`, with `effect` drawn on it.
+    struct Patch;
+    void makePatch(Patch& patch, Rect r, double scale, const std::function<void(cairo_t*)>& shape,
+                   const std::function<void(cairo_t*)>& effect);
+    /// Fades a patch in over the static panel: the glow at strength `alpha`.
+    void paintPatch(cairo_t* c, const Patch& patch, double alpha);
+    /// Paints the cached front layer (within the current clip).
+    void paintFront(cairo_t* c);
     void plate(cairo_t* c, Rect r, double u, const char* title);
     void staticLevers(cairo_t* c, const Layout& l);
     void staticGauges(cairo_t* c, const Layout& l);
@@ -137,6 +146,22 @@ private:
     std::array<double, 3> knobSpin{};
     double distance = 0; // travelled, in "AU", shown on the drum counter
 
-    cairo_surface_t* cache = nullptr;
+    cairo_surface_t* cache = nullptr;      // everything that never moves
+    cairo_surface_t* frontCache = nullptr; // the Nixie tubes' cage and glass, drawn over the lit digits
+    /// A piece of the static panel with a glow applied at full strength, in device pixels.
+    struct Patch {
+        cairo_surface_t* image = nullptr;
+        int x = 0, y = 0;
+        void release() {
+            if (image) cairo_surface_destroy(image);
+            image = nullptr;
+        }
+    };
+    std::array<Patch, 3> litFaces;            // meter faces lit by their bulbs
+    std::array<Patch, nixieCount> hazedTubes; // tubes filled with neon haze
+    cairo_surface_t* gripImage = nullptr;  // a throttle lever's grip
+    cairo_surface_t* capImage = nullptr;   // a fader cap
+    ShadowCache shadows;
+    enum : long { shadowLever = 1, shadowBulb, shadowDot, shadowFader, shadowNixie = 100, shadowLamp = 200 };
     double cacheW = 0, cacheH = 0, cacheScale = 0;
 };

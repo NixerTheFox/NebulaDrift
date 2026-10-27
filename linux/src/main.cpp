@@ -141,6 +141,7 @@ struct Overlay {
     cairo_surface_t* surface = nullptr;
     GLuint texture = 0;
     int width = 0, height = 0;
+    int textureW = 0, textureH = 0; // size the texture was allocated at
     double x = 0, y = 0; // top-left, in drawable pixels
     bool hasContent = false;
 
@@ -172,8 +173,15 @@ struct Overlay {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, cairo_image_surface_get_stride(surface) / 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                     cairo_image_surface_get_data(surface));
+        if (width == textureW && height == textureH) {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE,
+                            cairo_image_surface_get_data(surface));
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE,
+                         cairo_image_surface_get_data(surface));
+            textureW = width;
+            textureH = height;
+        }
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         hasContent = true;
     }
@@ -892,6 +900,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    // NVIDIA's driver spins a CPU core while waiting for vsync unless told to sleep (ignored by other drivers).
+    setenv("__GL_YIELD", "USLEEP", 0);
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 #ifdef SDL_HINT_APP_NAME
     SDL_SetHint(SDL_HINT_APP_NAME, "Nebula Drift");

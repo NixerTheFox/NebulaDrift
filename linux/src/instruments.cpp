@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstdio>
 
+/// Colour of the Nixie tubes' neon glow.
+static const RGBA neon{1.0, 0.4, 0.1, 1};
+
 static double clampd(double v, double lo, double hi) { return std::min(std::max(v, lo), hi); }
 
 static double contextScale(cairo_t* c) {
@@ -25,6 +28,73 @@ static void line(cairo_t* c, Pt a, Pt b) {
 
 InstrumentPanel::~InstrumentPanel() {
     if (cache) cairo_surface_destroy(cache);
+    if (frontCache) cairo_surface_destroy(frontCache);
+    for (Patch& p : litFaces) p.release();
+    for (Patch& p : hazedTubes) p.release();
+    if (gripImage) cairo_surface_destroy(gripImage);
+    if (capImage) cairo_surface_destroy(capImage);
+}
+
+/// Renders `draw` (from the origin, `w` x `h` points) once into `image` (replacing it), at the console's pixel scale.
+static void makeImage(cairo_surface_t*& image, double w, double h, double scale,
+                      const std::function<void(cairo_t*)>& draw) {
+    if (image) cairo_surface_destroy(image);
+    image = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, std::max(int(std::ceil(w * scale)), 1),
+                                       std::max(int(std::ceil(h * scale)), 1));
+    cairo_t* c = cairo_create(image);
+    cairo_scale(c, scale, scale);
+    draw(c);
+    cairo_destroy(c);
+}
+
+/// Paints an image made by makeImage with its top-left corner at `origin`.
+static void paintImage(cairo_t* c, cairo_surface_t* image, Pt origin) {
+    if (!image) return;
+    double scale = contextScale(c);
+    cairo_save(c);
+    cairo_translate(c, origin.x, origin.y);
+    cairo_scale(c, 1 / scale, 1 / scale);
+    cairo_set_source_surface(c, image, 0, 0);
+    cairo_paint(c);
+    cairo_restore(c);
+}
+
+void InstrumentPanel::makePatch(Patch& patch, Rect r, double scale, const std::function<void(cairo_t*)>& shape,
+                                const std::function<void(cairo_t*)>& effect) {
+    patch.release();
+    patch.x = int(std::floor(r.minX() * scale));
+    patch.y = int(std::floor(r.minY() * scale));
+    int w = int(std::ceil(r.maxX() * scale)) - patch.x, h = int(std::ceil(r.maxY() * scale)) - patch.y;
+    patch.image = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, std::max(w, 1), std::max(h, 1));
+    cairo_t* c = cairo_create(patch.image);
+    cairo_translate(c, -patch.x, -patch.y);
+    cairo_scale(c, scale, scale);
+    shape(c);
+    cairo_clip(c);
+    cairo_save(c);
+    cairo_scale(c, 1 / scale, 1 / scale);
+    cairo_set_source_surface(c, cache, 0, 0);
+    cairo_paint(c);
+    cairo_restore(c);
+    effect(c);
+    cairo_destroy(c);
+}
+
+void InstrumentPanel::paintPatch(cairo_t* c, const Patch& patch, double alpha) {
+    if (!patch.image || alpha <= 0) return;
+    cairo_save(c);
+    cairo_scale(c, 1 / cacheScale, 1 / cacheScale);
+    cairo_set_source_surface(c, patch.image, patch.x, patch.y);
+    cairo_paint_with_alpha(c, std::min(alpha, 1.0));
+    cairo_restore(c);
+}
+
+void InstrumentPanel::paintFront(cairo_t* c) {
+    cairo_save(c);
+    cairo_scale(c, 1 / cacheScale, 1 / cacheScale);
+    cairo_set_source_surface(c, frontCache, 0, 0);
+    cairo_paint(c);
+    cairo_restore(c);
 }
 
 // MARK: Update
@@ -166,6 +236,50 @@ void InstrumentPanel::drawStrip(cairo_t* c, double width, double height) {
         cairo_scale(lc, scale, scale);
         drawStatic(lc, l, width);
         cairo_destroy(lc);
+        // What lies in front of the glowing digits (the anode cage, reflections on the glass) never changes either.
+        if (frontCache) cairo_surface_destroy(frontCache);
+        frontCache = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, int(std::ceil(width * scale)),
+                                                int(std::ceil(l.stripHeight * scale)));
+        lc = cairo_create(frontCache);
+        cairo_scale(lc, scale, scale);
+        drawFronts(lc, l);
+        cairo_destroy(lc);
+        // Glows that only fade: the meter faces lit by their bulbs, and the tubes filled with neon haze, made once
+        // at full strength and faded in over the unlit panel.
+        double u = l.u;
+        for (int k = 0; k < 3; k++) {
+            Rect face = gaugeFace(l, k).inset(0.025 * u, 0.025 * u);
+            Pt bulbAt{face.midX(), face.maxY() - face.h * 0.04};
+            makePatch(litFaces[k], face, scale, [&](cairo_t* c) { addRoundedRect(c, face, 0.02 * u); }, [&](cairo_t* c) {
+                cairo_set_operator(c, CAIRO_OPERATOR_SCREEN);
+                radialGradient(c, bulbAt, face.h * 1.15,
+                               {rgb(1, 0.78, 0.45, 0.55), rgb(0.95, 0.6, 0.28, 0.3), rgb(0.8, 0.45, 0.2, 0)}, {0, 0.45, 1});
+            });
+        }
+        std::vector<Rect> tubes = nixieTubes(l);
+        for (int k = 0; k < nixieCount; k++) {
+            Rect g = nixieGlass(tubes[k]);
+            Rect box = digitBox(g);
+            makePatch(hazedTubes[k], g, scale, [&](cairo_t* c) { addNixieGlassPath(c, g); }, [&](cairo_t* c) {
+                radialGradient(c, {box.midX(), box.midY()}, box.h * 0.8,
+                               {rgb(neon.r, neon.g, neon.b, 0.16), rgb(neon.r, neon.g * 0.8, neon.b, 0)});
+            });
+        }
+        makeImage(gripImage, 0.22 * u, 0.07 * u, scale, [&](cairo_t* c) {
+            Rect grip{0, 0, 0.22 * u, 0.07 * u};
+            addRoundedRect(c, grip, 0.03 * u);
+            cairo_clip(c);
+            linearGradient(c, grip, {rgb(0.85, 0.22, 0.15), rgb(0.4, 0.05, 0.04)}, true);
+            for (double gx = 0.03 * u; gx < grip.maxX() - 0.02 * u; gx += 0.025 * u) line(c, {gx, 0}, {gx, grip.maxY()});
+            stroke(c, rgb(0, 0, 0, 0.35), 1);
+        });
+        double capW = std::min(faderColumns(l).second * 0.72, 0.075 * u), capH = 0.05 * u;
+        makeImage(capImage, capW, capH, scale, [&](cairo_t* c) {
+            Rect cap{0, 0, capW, capH};
+            linearGradient(c, cap, {rgb(0.78, 0.78, 0.75), rgb(0.3, 0.3, 0.29)}, true);
+            fillRect(c, {1, cap.midY() - 0.5, cap.w - 2, 1.2}, rgb(1, 1, 1, 0.9));
+        });
+        shadows.clear();
         cacheW = width;
         cacheH = l.stripHeight;
         cacheScale = scale;
@@ -393,8 +507,6 @@ void InstrumentPanel::staticGauges(cairo_t* c, const Layout& l) {
 
 // MARK: Nixie tubes (velocity readout) and distance counter
 
-static const RGBA neon{1.0, 0.4, 0.1, 1};
-
 /// The tube row (upper part of the plate) and the drum counter row beneath it.
 std::pair<Rect, Rect> InstrumentPanel::nixieRows(const Layout& l) const {
     Rect r = content(l.dial, l.u);
@@ -592,6 +704,12 @@ void InstrumentPanel::staticNixies(cairo_t* c, const Layout& l) {
     Rect win = counterWindow(l);
     bezelRect(c, win.inset(-0.012 * u, -0.012 * u), u);
     fillRect(c, win, rgb(0.02, 0.02, 0.02));
+    // The drums themselves (their figures are drawn every frame).
+    int n = counterDigits(win);
+    for (int i = 0; i < n; i++) {
+        Rect cell{win.minX() + i * win.w / n, win.minY(), win.w / n, win.h};
+        linearGradient(c, cell.inset(1, 0), {rgb(0.05, 0.05, 0.05), rgb(0.16, 0.16, 0.15), rgb(0.05, 0.05, 0.05)}, true);
+    }
 }
 
 /// The counter window spans the whole row beneath the tubes (after the DIST/AU label).
@@ -726,6 +844,57 @@ void InstrumentPanel::staticLamps(cairo_t* c, const Layout& l) {
     }
 }
 
+/// Unchanging parts that lie over moving ones: drawn once into frontCache, painted after what they cover.
+void InstrumentPanel::drawFronts(cairo_t* c, const Layout& l) {
+    double u = l.u;
+    // VU meters: the shroud hiding the bulb, and the gloss of the glass.
+    for (int k = 0; k < 3; k++) {
+        Rect face = gaugeFace(l, k).inset(0.025 * u, 0.025 * u);
+        cairo_save(c);
+        addRoundedRect(c, face, 0.02 * u);
+        cairo_clip(c);
+        linearGradient(c, {face.minX(), face.maxY() - face.h * 0.1, face.w, face.h * 0.1},
+                       {rgb(0.1, 0.09, 0.08), rgb(0.03, 0.03, 0.03)}, true);
+        linearGradient(c, face, {rgb(1, 1, 1, 0.1), rgb(1, 1, 1, 0)}, false, 0.55);
+        cairo_restore(c);
+    }
+    // Drum counter: the gaps between drums, and their curvature (dark at the top and bottom of the window).
+    Rect win = counterWindow(l);
+    int n = counterDigits(win);
+    cairo_save(c);
+    clipRect(c, win);
+    for (int i = 0; i < n; i++) {
+        fillRect(c, {win.minX() + (i + 1) * win.w / n - 0.5, win.minY(), 1, win.h}, rgb(0, 0, 0, 0.6));
+    }
+    linearGradient(c, win, {rgb(0, 0, 0, 0.75), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.75)}, true);
+    cairo_restore(c);
+    // Scope: scanlines and the glass.
+    Rect s = scopeScreen(l);
+    cairo_save(c);
+    addRoundedRect(c, s, 0.05 * u);
+    cairo_clip(c);
+    setColor(c, rgb(0, 0, 0, 0.18));
+    for (double sy = s.minY(); sy < s.maxY(); sy += 3) addRect(c, {s.minX(), sy, s.w, 1});
+    cairo_fill(c);
+    linearGradient(c, s, {rgb(1, 1, 1, 0.08), rgb(1, 1, 1, 0)}, true, 0.5);
+    cairo_restore(c);
+    // Nixie tubes.
+    for (Rect tube : nixieTubes(l)) {
+        Rect g = nixieGlass(tube);
+        cairo_save(c);
+        addNixieGlassPath(c, g);
+        cairo_clip(c);
+        // Front of the anode cage, faintly lit by the glow behind it.
+        nixieMesh(c, g, rgb(0.9, 0.55, 0.3, 0.13));
+        // Reflections on the curved glass: a bright band on one side, a faint one on the other.
+        linearGradient(c, {g.minX() + g.w * 0.08, g.minY(), g.w * 0.14, g.h}, {rgb(1, 1, 1, 0.22), rgb(1, 1, 1, 0.02)},
+                       false);
+        linearGradient(c, {g.maxX() - g.w * 0.16, g.minY(), g.w * 0.08, g.h}, {rgb(1, 1, 1, 0.0), rgb(1, 1, 1, 0.1)},
+                       false);
+        cairo_restore(c);
+    }
+}
+
 // MARK: Moving parts (every frame)
 
 void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
@@ -737,56 +906,47 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         double v = clampd(levers[k].pos, 0, 1.05);
         double y = slot.maxY() - slot.w / 2 - v * (slot.h - slot.w);
         Rect grip{slot.midX() - 0.11 * u, y - 0.035 * u, 0.22 * u, 0.07 * u};
-        withShadow(c, 0, 0.02 * u, 0.035 * u, rgb(0, 0, 0, 0.8), [&](cairo_t* c) {
+        withCachedShadow(c, shadows, shadowLever, {grip.x, grip.y}, 1, 0, 0.02 * u, 0.035 * u, rgb(0, 0, 0, 0.8),
+                         [&](cairo_t* c) {
             fillRect(c, {slot.midX() - 0.012 * u, y - 0.02 * u, 0.024 * u, 0.04 * u}, rgb(0.25, 0.25, 0.25));
             addRoundedRect(c, grip, 0.03 * u);
             setColor(c, rgb(0.55, 0.08, 0.06));
             cairo_fill(c);
         });
-        cairo_save(c);
-        addRoundedRect(c, grip, 0.03 * u);
-        cairo_clip(c);
-        linearGradient(c, grip, {rgb(0.85, 0.22, 0.15), rgb(0.4, 0.05, 0.04)}, true);
-        double gx = grip.minX() + 0.03 * u;
-        while (gx < grip.maxX() - 0.02 * u) {
-            line(c, {gx, grip.minY()}, {gx, grip.maxY()});
-            gx += 0.025 * u;
-        }
-        stroke(c, rgb(0, 0, 0, 0.35), 1);
-        cairo_restore(c);
+        paintImage(c, gripImage, {grip.x, grip.y});
     }
 
     // VU gauges.
     for (int k = 0; k < 3; k++) {
         Rect face = gaugeFace(l, k).inset(0.025 * u, 0.025 * u);
         auto [pivot, R] = gaugeGeometry(face);
-        cairo_save(c);
-        addRoundedRect(c, face, 0.02 * u);
-        cairo_clip(c);
         // Light from one small warm bulb behind the bottom-centre of the face.
         double b = bulb * frand(0.97f, 1.0f);
         Pt bulbAt{face.midX(), face.maxY() - face.h * 0.04};
+        paintPatch(c, litFaces[k], b);
         cairo_save(c);
-        cairo_set_operator(c, CAIRO_OPERATOR_SCREEN);
-        radialGradient(c, bulbAt, face.h * 1.15,
-                       {rgb(1, 0.78, 0.45, 0.55 * b), rgb(0.95, 0.6, 0.28, 0.3 * b), rgb(0.8, 0.45, 0.2, 0)},
-                       {0, 0.45, 1});
-        cairo_restore(c);
+        addRoundedRect(c, face, 0.02 * u);
+        cairo_clip(c);
         double a = gaugeAngle(clampd(gauges[k].pos, -0.03, 1.06));
-        // The needle casts a long shadow away from the bulb.
-        withShadow(c, 0, -0.012 * u, 0.012 * u, rgb(0, 0, 0, 0.45), [&](cairo_t* c) {
-            line(c, pivot, polar(pivot, R * 0.94, a));
-            stroke(c, rgb(0.12, 0.08, 0.06), std::max(1.2, 0.009 * u));
-        });
-        // Shroud along the bottom hiding the bulb, which peeks over its edge.
+        // The needle casts a long shadow away from the bulb: soft lines (blurring it every frame costs too much).
+        double needleW = std::max(1.2, 0.009 * u), soft = 0.006 * u;
+        Pt shadowPivot{pivot.x, pivot.y - 0.012 * u};
+        cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
+        for (auto [extra, alpha] : {std::pair{3.0, 0.14}, std::pair{1.2, 0.22}}) {
+            line(c, shadowPivot, polar(shadowPivot, R * 0.94, a));
+            stroke(c, rgb(0, 0, 0, alpha), needleW + extra * soft);
+        }
+        cairo_set_line_cap(c, CAIRO_LINE_CAP_BUTT);
+        line(c, pivot, polar(pivot, R * 0.94, a));
+        stroke(c, rgb(0.12, 0.08, 0.06), needleW);
+        // Shroud along the bottom hiding the bulb, which peeks over its edge (and the glass, both cached).
         Rect shroud{face.minX(), face.maxY() - face.h * 0.1, face.w, face.h * 0.1};
-        linearGradient(c, shroud, {rgb(0.1, 0.09, 0.08), rgb(0.03, 0.03, 0.03)}, true);
-        withShadow(c, 0, 0, 0.03 * u, rgb(1, 0.7, 0.35, 0.8 * b), [&](cairo_t* c) {
+        paintFront(c);
+        withCachedShadow(c, shadows, shadowBulb, bulbAt, b, 0, 0, 0.03 * u, rgb(1, 0.7, 0.35, 0.8 * b), [&](cairo_t* c) {
             addEllipse(c, {bulbAt.x - 0.016 * u, shroud.minY() - 0.008 * u, 0.032 * u, 0.016 * u});
             setColor(c, rgb(1, 0.88, 0.65, b));
             cairo_fill(c);
         });
-        linearGradient(c, face, {rgb(1, 1, 1, 0.1), rgb(1, 1, 1, 0)}, false, 0.55);
         cairo_restore(c);
     }
 
@@ -796,13 +956,12 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         Rect g = nixieGlass(tubes[k]);
         Rect box = digitBox(g);
         double lit = frand(0.92f, 1.0f) * (chaos > 0.02f && frand(0, 1) < chaos * 0.3f ? 0.2 : 1);
-        cairo_save(c);
-        addNixieGlassPath(c, g);
-        cairo_clip(c);
         // Neon haze filling the glass around the glowing cathode.
-        Pt center{box.midX(), box.midY()};
-        radialGradient(c, center, box.h * 0.8,
-                       {rgb(neon.r, neon.g, neon.b, 0.16 * lit), rgb(neon.r, neon.g * 0.8, neon.b, 0)});
+        paintPatch(c, hazedTubes[k], lit);
+        // The glass has straight sides and the digits sit well below its dome: a rectangular clip does the same
+        // job as the glass outline here, and is far cheaper to draw through.
+        cairo_save(c);
+        clipRect(c, g);
         // The lit numeral: a wide soft bloom, the orange glow, then the hot core of the wire.
         // The previous cathode's afterglow, then the new one igniting.
         double age = nixieAge[k];
@@ -819,34 +978,36 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
             const Pass passes[3] = {{box.h * 0.1, rgb(neon.r, neon.g, neon.b, 0.16 * glow), box.h * 0.14},
                                     {box.h * 0.05, rgb(neon.r, neon.g + 0.05, neon.b, 0.9 * glow), box.h * 0.04},
                                     {box.h * 0.02, rgb(1, 0.8, 0.55, glow), 0}};
-            for (const Pass& p : passes) {
+            for (int pass = 0; pass < 3; pass++) {
+                const Pass& p = passes[pass];
                 auto body = [&](cairo_t* c) {
                     cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);
                     cairo_set_line_join(c, CAIRO_LINE_JOIN_ROUND);
                     addNixieDigit(c, d, box);
                     stroke(c, p.color, std::max(0.8, p.width));
                 };
-                if (p.blur > 0) withShadow(c, 0, 0, p.blur, rgb(neon.r, neon.g, neon.b, 0.7 * glow), body);
-                else body(c);
+                if (p.blur > 0) {
+                    withCachedShadow(c, shadows, shadowNixie + d * 4 + pass, {box.x, box.y}, p.color.a, 0, 0, p.blur,
+                                     rgb(neon.r, neon.g, neon.b, 0.7 * glow), body);
+                } else {
+                    cairo_save(c);
+                    body(c);
+                    cairo_restore(c);
+                }
             }
         }
         // Decimal point cathode after the second digit.
         if (k == 1) {
             double r = box.h * 0.045;
             Rect dot{g.maxX() - g.w * 0.13 - r, box.maxY() - r, 2 * r, 2 * r};
-            withShadow(c, 0, 0, box.h * 0.08, rgb(neon.r, neon.g, neon.b, lit), [&](cairo_t* c) {
+            withCachedShadow(c, shadows, shadowDot, {dot.x, dot.y}, lit, 0, 0, box.h * 0.08,
+                             rgb(neon.r, neon.g, neon.b, lit), [&](cairo_t* c) {
                 addEllipse(c, dot);
                 setColor(c, rgb(1, 0.7, 0.4, lit));
                 cairo_fill(c);
             });
         }
-        // Front of the anode cage, faintly lit by the glow behind it.
-        nixieMesh(c, g, rgb(0.9, 0.55, 0.3, 0.13));
-        // Reflections on the curved glass: a bright band on one side, a faint one on the other.
-        linearGradient(c, {g.minX() + g.w * 0.08, g.minY(), g.w * 0.14, g.h}, {rgb(1, 1, 1, 0.22), rgb(1, 1, 1, 0.02)},
-                       false);
-        linearGradient(c, {g.maxX() - g.w * 0.16, g.minY(), g.w * 0.08, g.h}, {rgb(1, 1, 1, 0.0), rgb(1, 1, 1, 0.1)},
-                       false);
+        paintFront(c); // the cage and glass in front
         cairo_restore(c);
     }
 
@@ -867,7 +1028,6 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         double roll = place == 0 ? frac : 0;
         if (place > 0 && (whole % power) == power - 1) roll = frac;
         Rect cell{win.minX() + i * dw, win.minY(), dw, win.h};
-        linearGradient(c, cell.inset(1, 0), {rgb(0.05, 0.05, 0.05), rgb(0.16, 0.16, 0.15), rgb(0.05, 0.05, 0.05)}, true);
         for (int offset = 0; offset <= 1; offset++) {
             int value = (digit + offset) % 10;
             double y = cell.midY() + (offset - roll) * cell.h;
@@ -875,10 +1035,8 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
             std::snprintf(s, sizeof(s), "%d", value);
             drawText(c, s, {cell.midX(), y}, cell.h * 0.78, i == n - 1 ? rgb(0.95, 0.35, 0.25) : rgb(0.93, 0.91, 0.85));
         }
-        fillRect(c, {cell.maxX() - 0.5, cell.minY(), 1, cell.h}, rgb(0, 0, 0, 0.6));
     }
-    // Drum curvature: dark at the top and bottom of the window.
-    linearGradient(c, win, {rgb(0, 0, 0, 0.75), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.75)}, true);
+    paintFront(c); // the gaps between drums and their curvature
     cairo_restore(c);
 
     // Fader caps.
@@ -889,10 +1047,9 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         double y = t.bottom - v * (t.bottom - t.top);
         double capW = std::min(cw * 0.72, 0.075 * u), capH = 0.05 * u;
         Rect cap{t.x - capW / 2, y - capH / 2, capW, capH};
-        withShadow(c, 0, 0.012 * u, 0.02 * u, rgb(0, 0, 0, 0.8),
+        withCachedShadow(c, shadows, shadowFader, {cap.x, cap.y}, 1, 0, 0.012 * u, 0.02 * u, rgb(0, 0, 0, 0.8),
                    [&](cairo_t* c) { fillRect(c, cap, rgb(0.5, 0.5, 0.48)); });
-        linearGradient(c, cap, {rgb(0.78, 0.78, 0.75), rgb(0.3, 0.3, 0.29)}, true);
-        fillRect(c, {cap.minX() + 1, cap.midY() - 0.5, cap.w - 2, 1.2}, rgb(1, 1, 1, 0.9));
+        paintImage(c, capImage, {cap.x, cap.y});
     }
 
     // Scope traces: spectrum, plus a bass-driven sine sweep.
@@ -935,9 +1092,7 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
             else stroke(c, rgb(0.6, 1, 0.72, 0.95 * alpha), std::max(1.0, 0.008 * u));
         }
     }
-    setColor(c, rgb(0, 0, 0, 0.18));
-    for (double sy = s.minY(); sy < s.maxY(); sy += 3) addRect(c, {s.minX(), sy, s.w, 1});
-    cairo_fill(c);
+    paintFront(c); // scanlines and glass
     if (chaos > 0.02f && std::sin(time * 14) > -0.2) {
         fillRect(c, s, rgb(0.6, 0.02, 0.02, 0.45 * chaos));
         drawText(c, "WARNING", {s.midX(), s.midY() - s.h * 0.14}, s.h * 0.3, rgb(1, 0.25, 0.2));
@@ -945,7 +1100,6 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         std::snprintf(label, sizeof(label), "TIDAL STRESS %d%%", int(chaos * 100));
         drawText(c, label, {s.midX(), s.midY() + s.h * 0.22}, s.h * 0.16, rgb(1, 0.5, 0.4));
     }
-    linearGradient(c, s, {rgb(1, 1, 1, 0.08), rgb(1, 1, 1, 0)}, true, 0.5);
     cairo_restore(c);
 
     // Knob pointers.
@@ -971,7 +1125,12 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
             setColor(c, rgb(col.r * k, col.g * k, col.b * k));
             cairo_fill(c);
         };
-        if (on > 0.05) withShadow(c, 0, 0, lamp.radius * 2.4 * on, rgb(col.r, col.g, col.b, 0.55 * on), body);
+        if (on > 0.05) {
+            // The glow's size follows the filament's warmth, in 8 steps so each step's blur is made only once.
+            int step = int(std::ceil(on * 8));
+            withCachedShadow(c, shadows, shadowLamp + (i == 0 ? 0 : 16) + step, Pt{rect.x, rect.y},
+                             1, 0, 0, lamp.radius * 2.4 * step / 8, rgb(col.r, col.g, col.b, 0.55 * on), body);
+        }
         else body(c);
         addEllipse(c, rect.inset(lamp.radius * 0.45, lamp.radius * 0.45).offset(-lamp.radius * 0.2, -lamp.radius * 0.25));
         setColor(c, rgb(1, 1, 1, 0.25 + 0.35 * on));

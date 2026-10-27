@@ -6,6 +6,7 @@
 #include <cairo.h>
 #include <cmath>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,27 @@ void radialGradient(cairo_t* c, Pt center, double radius, const std::vector<RGBA
 /// Draws what `body` draws with a soft drop shadow underneath, like CGContext.setShadow. Offset and blur
 /// are in points (scaled with the context), offset y positive is down.
 void withShadow(cairo_t* c, double dx, double dy, double blur, RGBA color, const std::function<void(cairo_t*)>& body);
+
+/// Blurred shadows of shapes that only move or fade, made once and reused (see withCachedShadow).
+struct ShadowCache {
+    struct Entry {
+        cairo_surface_t* mask;
+        double offX, offY; // from the anchor to the mask, in device pixels
+        double alpha;      // content alpha it was made with
+    };
+    std::map<long, Entry> entries;
+
+    ShadowCache() = default;
+    ShadowCache(const ShadowCache&) = delete;
+    ShadowCache& operator=(const ShadowCache&) = delete;
+    ~ShadowCache() { clear(); }
+    void clear();
+};
+
+/// withShadow for a shape identified by `key` that only ever moves (`anchor` is a point fixed to it) and fades
+/// (`contentAlpha` is the alpha it is drawn with). Clear the cache when the shape's size or scale changes.
+void withCachedShadow(cairo_t* c, ShadowCache& cache, long key, Pt anchor, double contentAlpha, double dx, double dy,
+                      double blur, RGBA color, const std::function<void(cairo_t*)>& body);
 
 /// Label text in the console's condensed font. `p` is the centre (or left edge, with alignLeft) of the
 /// text, vertically centred on its capitals. `tracking` is extra space after each character, in ems.
