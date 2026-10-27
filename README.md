@@ -1,3 +1,6 @@
+#This App is 100% ai Coded!
+THE IDEA IS 100% Mine tho.
+
 # Nebula Drift
 
 An audio visualizer for macOS and Linux. You fly through space while the music drives everything you see: stars stream past, nebulae, gas clouds and galaxies grow from distant specks into vast clouds you fly through, beats send shockwaves across the view, and on very rare occasions you pass a black hole that bends light around it. A retro spacecraft console with Nixie tubes, VU meters and sliders reacts to the sound below the view.
@@ -14,7 +17,7 @@ Download `Nebula_Drift-macOS.zip` from the [latest release](https://github.com/N
 - Apple's command line tools (`xcode-select --install`) for `swiftc`
 
 ### Build and run
-
+release
 ```bash
 ./build.sh
 open "build/Nebula Drift.app"
