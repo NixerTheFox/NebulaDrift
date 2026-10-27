@@ -6,6 +6,8 @@ The macOS app is written in Swift with Metal shaders (no Xcode project, no depen
 
 ## macOS
 
+Download `Nebula_Drift-macOS.zip` from the [latest release](https://github.com/NixerTheFox/NebulaDrift/releases/latest), or build it yourself. The app isn't notarized: the first time, right-click it and choose **Open**.
+
 ### Requirements
 
 - macOS 14.2 or later (system audio capture uses Core Audio process taps)
@@ -24,7 +26,7 @@ On first launch macOS asks for **System Audio Recording** permission so the app 
 
 ### AppImage
 
-Every push that touches `linux/` builds `Nebula_Drift-x86_64.AppImage` with GitHub Actions (download it from the run's artifacts; tagged `v*` releases get it attached). Then:
+Download `Nebula_Drift-x86_64.AppImage` from the [latest release](https://github.com/NixerTheFox/NebulaDrift/releases/latest) (every push that touches `linux/` also builds one in GitHub Actions, under the run's artifacts). Then:
 
 ```bash
 chmod +x Nebula_Drift-x86_64.AppImage

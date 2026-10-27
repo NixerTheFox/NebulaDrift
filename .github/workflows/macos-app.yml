@@ -1,0 +1,33 @@
+name: macOS app
+
+on:
+  push:
+    branches: ['**']
+    paths: ['Sources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
+  pull_request:
+    paths: ['Sources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
+  workflow_dispatch:
+  workflow_call: # from release.yml
+
+jobs:
+  app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app
+        run: ./build.sh
+
+      - name: Check the binary
+        run: |
+          lipo -info "build/Nebula Drift.app/Contents/MacOS/NebulaDrift"
+          codesign --verify --verbose "build/Nebula Drift.app"
+
+      - name: Zip
+        run: ditto -c -k --keepParent "build/Nebula Drift.app" build/Nebula_Drift-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nebula_Drift-macOS.zip
+          path: build/Nebula_Drift-macOS.zip
+          if-no-files-found: error
