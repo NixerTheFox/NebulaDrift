@@ -1,0 +1,46 @@
+name: Linux AppImage
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths: ['linux/**', '.github/workflows/linux-appimage.yml']
+  pull_request:
+    paths: ['linux/**', '.github/workflows/linux-appimage.yml']
+  workflow_dispatch:
+
+jobs:
+  appimage:
+    # The oldest supported runner, so the AppImage runs on as many distributions as possible (glibc 2.35+).
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # attach the AppImage to releases of v* tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libsdl2-dev libcairo2-dev libfreetype-dev libgl-dev \
+            xvfb libgl1-mesa-dri
+
+      - name: Build AppImage
+        run: linux/build-appimage.sh
+
+      - name: Smoke test (render the test frames headless)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: xvfb-run -a linux/build/Nebula_Drift-x86_64.AppImage --snapshot "$RUNNER_TEMP/snapshots"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nebula_Drift-x86_64.AppImage
+          path: linux/build/Nebula_Drift-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: linux/build/Nebula_Drift-x86_64.AppImage
