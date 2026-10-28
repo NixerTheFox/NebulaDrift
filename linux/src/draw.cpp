@@ -6,10 +6,14 @@
 #include FT_FREETYPE_H
 #include <random>
 
-float frand(float a, float b) {
+static std::mt19937& generator() {
     static thread_local std::mt19937 rng{std::random_device{}()};
-    return std::uniform_real_distribution<float>(a, b)(rng);
+    return rng;
 }
+
+float frand(float a, float b) { return std::uniform_real_distribution<float>(a, b)(generator()); }
+
+void seedRandom(unsigned seed) { generator().seed(seed); }
 
 void addRoundedRect(cairo_t* c, Rect r, double radius) {
     radius = std::max(0.0, std::min({radius, r.w / 2, r.h / 2}));

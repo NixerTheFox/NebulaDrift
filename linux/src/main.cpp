@@ -666,6 +666,7 @@ private:
 /// `--snapshot <dir>` renders test frames with synthetic audio, for testing without a visible window.
 static void runSnapshot(const std::string& resources, const std::string& dir) {
     const std::string shaders = resources + "/shaders";
+    seedRandom(1); // the same frames every run, so renders can be compared
     auto write = [&](Renderer& r, int w, int h, const std::string& name,
                      const std::function<void(cairo_t*)>& overlay = nullptr) {
         r.render(w, h);
@@ -771,6 +772,12 @@ static void runSnapshot(const std::string& resources, const std::string& dir) {
         for (int i = 0; i < 10; i++) write(plain, 1512, 900, "bench");
         double without = (nowSeconds() - t1) * 100;
         std::printf("frame with black hole %.1f ms, without %.1f ms (both incl. PNG write)\n", withHole, without);
+        plain.cockpitGlass = true;
+        plain.step(1.0f / 60, 1512, 900);
+        write(plain, 1512, 900, "bench");
+        double t2 = nowSeconds();
+        for (int i = 0; i < 10; i++) write(plain, 1512, 900, "bench");
+        std::printf("frame with cockpit glass %.1f ms (incl. PNG write)\n", (nowSeconds() - t2) * 100);
     }
 
     // Black hole variants: standard, quasar, bare, torus (seeds chosen so fract(seed * 3.7) picks each kind).

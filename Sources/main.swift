@@ -556,7 +556,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let bgPipeline: MTLRenderPipelineState
     private let starPipeline: MTLRenderPipelineState
     private let postPipeline: MTLRenderPipelineState
+    private let glassPipeline: MTLRenderPipelineState
+    private let holePipeline: MTLRenderPipelineState
     private var sceneTexture: MTLTexture?
+    private var glassTexture: MTLTexture?   // canopy scratches and smudges, made once per frame size
+    private var glassReady = false
+    private var holeTextures: [MTLTexture] = [] // black hole rays at half resolution: direction, light
     private var ringAges: [Float] = []
     private var lastBeatAge: Float = .infinity
     private var spawnTimer: Float = .random(in: 15...35)
@@ -744,6 +749,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         post.colorAttachments[0].pixelFormat = pixelFormat
         postPipeline = try device.makeRenderPipelineState(descriptor: post)
 
+        let glass = MTLRenderPipelineDescriptor()
+        glass.vertexFunction = library.makeFunction(name: "bgVertex")
+        glass.fragmentFunction = library.makeFunction(name: "glassFragment")
+        glass.colorAttachments[0].pixelFormat = .rg16Float
+        glassPipeline = try device.makeRenderPipelineState(descriptor: glass)
+
+        let hole = MTLRenderPipelineDescriptor()
+        hole.vertexFunction = library.makeFunction(name: "bgVertex")
+        hole.fragmentFunction = library.makeFunction(name: "holeFragment")
+        hole.colorAttachments[0].pixelFormat = .rgba16Float
+        hole.colorAttachments[1].pixelFormat = .rgba16Float
+        holePipeline = try device.makeRenderPipelineState(descriptor: hole)
+
         let st = MTLRenderPipelineDescriptor()
         st.vertexFunction = library.makeFunction(name: "starVertex")
         st.fragmentFunction = library.makeFunction(name: "starFragment")
@@ -893,14 +911,72 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stars.count)
         enc.endEncoding()
 
+        // The canopy's scratches and smudges are fixed to the ship: worked out once per frame size.
+        if cockpitGlass && (!glassReady || glassTexture?.width != target.width || glassTexture?.height != target.height) {
+            let t = makeTexture(.rg16Float, width: target.width, height: target.height)
+            let glassPass = MTLRenderPassDescriptor()
+            glassPass.colorAttachments[0].texture = t
+            glassPass.colorAttachments[0].loadAction = .dontCare
+            glassPass.colorAttachments[0].storeAction = .store
+            if let g = cb.makeRenderCommandEncoder(descriptor: glassPass) {
+                g.setRenderPipelineState(glassPipeline)
+                g.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+                g.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                g.endEncoding()
+                glassTexture = t
+                glassReady = true
+            }
+        }
+
+        // Light rays past the black hole, one per 2 x 2 pixels (3 x 3 on Retina-sized frames).
+        let hole = u.blackHole3.w > 0.001
+        if hole {
+            let step = Self.holeStep(width: target.width)
+            let hw = (target.width + step - 1) / step, hh = (target.height + step - 1) / step
+            if holeTextures.first?.width != hw || holeTextures.first?.height != hh {
+                holeTextures = [makeTexture(.rgba16Float, width: hw, height: hh),
+                                makeTexture(.rgba16Float, width: hw, height: hh)]
+            }
+            let holePass = MTLRenderPassDescriptor()
+            for (i, t) in holeTextures.enumerated() {
+                holePass.colorAttachments[i].texture = t
+                holePass.colorAttachments[i].loadAction = .dontCare
+                holePass.colorAttachments[i].storeAction = .store
+            }
+            if let h = cb.makeRenderCommandEncoder(descriptor: holePass) {
+                var frame = SIMD4<Float>(Float(target.width), Float(target.height), Float(step), 0)
+                h.setRenderPipelineState(holePipeline)
+                h.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+                h.setFragmentBytes(&frame, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+                h.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                h.endEncoding()
+            }
+        }
+
         // Post pass: dither down to the 8-bit output.
         guard let post = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
         post.setRenderPipelineState(postPipeline)
         post.setFragmentTexture(scene, index: 0)
+        // Unused inputs still need a texture bound; the scene stands in.
+        post.setFragmentTexture(cockpitGlass ? glassTexture ?? scene : scene, index: 1)
+        post.setFragmentTexture(hole ? holeTextures[0] : scene, index: 2)
+        post.setFragmentTexture(hole ? holeTextures[1] : scene, index: 3)
         post.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         post.setFragmentBytes(&rings, length: MemoryLayout<Float>.stride * rings.count, index: 2)
         post.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         post.endEncoding()
+    }
+
+    /// Pixels per black hole ray along each axis: wider frames get coarser rays, so the cost stays about the
+    /// same as at standard resolution.
+    static func holeStep(width: Int) -> Int { width > 2200 ? 3 : 2 }
+
+    private func makeTexture(_ format: MTLPixelFormat, width: Int, height: Int) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: max(width, 1),
+                                                            height: max(height, 1), mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        return device.makeTexture(descriptor: desc)!
     }
 
     private func sceneTexture(width: Int, height: Int) -> MTLTexture {
@@ -1382,6 +1458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 /// `--snapshot <dir>` renders a calm and a loud frame with synthetic audio, for testing without a window.
 func runSnapshot(dir: String) throws {
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     guard let device = MTLCreateSystemDefaultDevice(),
           let url = Bundle.main.url(forResource: "Shaders", withExtension: "metal") else {
         throw NSError(domain: "NebulaDrift", code: 2)
@@ -1471,6 +1548,12 @@ func runSnapshot(dir: String) throws {
         for _ in 0..<10 { try plain.snapshot(width: 1512, height: 900, to: url) }
         let without = (CACurrentMediaTime() - t1) * 100
         print(String(format: "frame with black hole %.1f ms, without %.1f ms (both incl. PNG write)", withHole, without))
+        plain.cockpitGlass = true
+        plain.step(dt: 1 / 60, size: CGSize(width: 1512, height: 900))
+        try plain.snapshot(width: 1512, height: 900, to: url)
+        let t2 = CACurrentMediaTime()
+        for _ in 0..<10 { try plain.snapshot(width: 1512, height: 900, to: url) }
+        print(String(format: "frame with cockpit glass %.1f ms (incl. PNG write)", (CACurrentMediaTime() - t2) * 100))
     }
 
     // Black hole variants: standard, quasar, bare, torus (seeds chosen so fract(seed * 3.7) picks each kind).
@@ -1597,7 +1680,65 @@ func runSnapshot(dir: String) throws {
     print("Snapshots written to \(dir)")
 }
 
+/// `--bench-console <dir>` times the instrument console's redraw (CPU only, no GPU needed) at Retina and normal
+/// resolution, calm and under tidal stress, and writes each last frame as a PNG.
+func runConsoleBench(dir: String, profileSeconds: Double = 0) {
+    let cases: [(String, Int, Int, Int, Float)] = [("retina", 1600, 900, 2, 0), ("retina_alarm", 1600, 900, 2, 0.8),
+                                                    ("standard", 1280, 780, 1, 0)]
+    for (name, w, h, scale, alarm) in profileSeconds > 0 ? [cases[0]] : cases {
+        let size = CGSize(width: w, height: h)
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let ctx = CGContext(data: nil, width: w * scale, height: h * scale, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)!
+        ctx.translateBy(x: 0, y: CGFloat(h * scale))
+        ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
+        let panel = InstrumentPanel()
+        var t: Float = 0
+        func frame() {
+            t += 1 / 60
+            let bands = (0..<AudioAnalyzer.bandCount).map { i in 0.5 + 0.3 * sinf(Float(i) * 0.4 + t * 5) }
+            panel.update(PanelInput(bands: bands, bass: 0.5 + 0.4 * sinf(t * 7), mid: 0.5 + 0.3 * sinf(t * 3),
+                                    treble: 0.4 + 0.3 * sinf(t * 11), level: 0.6, beat: fmodf(t, 0.5) < 0.1 ? 1 : 0,
+                                    speed: 0.4 + 0.3 * sinf(t), hue: t * 0.05, centroid: 0.5, roll: t * 0.02,
+                                    alarm: alarm), dt: 1 / 60)
+            ctx.clear(CGRect(origin: .zero, size: size))
+            panel.draw(in: ctx, viewSize: size)
+        }
+        for _ in 0..<20 { frame() }
+        var count = 240
+        let t0 = CACurrentMediaTime()
+        if profileSeconds > 0 {
+            // Keep redrawing for a profiler to sample.
+            count = 0
+            while CACurrentMediaTime() - t0 < profileSeconds {
+                frame()
+                count += 1
+            }
+        } else {
+            for _ in 0..<count { frame() }
+        }
+        let ms = (CACurrentMediaTime() - t0) / Double(count) * 1000
+        print(String(format: "console redraw %@ (%dx%d @%dx): %.2f ms", name, w, h, scale, ms))
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("console_\(name).png")
+        if let image = ctx.makeImage(),
+           let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, image, nil)
+            CGImageDestinationFinalize(dest)
+        }
+    }
+}
+
 let args = CommandLine.arguments
+if args.contains("--bench-gpu") {
+    runGPUBench()
+    exit(0)
+}
+if let i = args.firstIndex(of: "--bench-console"), i + 1 < args.count {
+    try? FileManager.default.createDirectory(atPath: args[i + 1], withIntermediateDirectories: true)
+    let seconds = args.firstIndex(of: "--profile-seconds").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil }
+    runConsoleBench(dir: args[i + 1], profileSeconds: seconds ?? 0)
+    exit(0)
+}
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
     do { try runSnapshot(dir: args[i + 1]) } catch { print("Snapshot failed: \(error)"); exit(1) }
     exit(0)

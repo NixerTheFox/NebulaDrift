@@ -3,9 +3,9 @@ name: macOS app
 on:
   push:
     branches: ['**']
-    paths: ['Sources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
+    paths: ['Sources/**', 'Resources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
   pull_request:
-    paths: ['Sources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
+    paths: ['Sources/**', 'Resources/**', 'build.sh', 'Info.plist', '.github/workflows/macos-app.yml']
   workflow_dispatch:
   workflow_call: # from release.yml
 
@@ -22,6 +22,24 @@ jobs:
         run: |
           lipo -info "build/Nebula Drift.app/Contents/MacOS/NebulaDrift"
           codesign --verify --verbose "build/Nebula Drift.app"
+          test -s "build/Nebula Drift.app/Contents/Resources/AppIcon.icns"
+
+      - name: Benchmark the console
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench'
+
+      - name: Compile the Metal shaders
+        run: xcrun -sdk macosx metal -c Sources/Shaders.metal -o build/Shaders.air
+
+      - name: Render the test frames
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
+
+      - name: Benchmark the GPU
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-gpu'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-bench
+          path: build/bench
 
       - name: Zip
         run: ditto -c -k --keepParent "build/Nebula Drift.app" build/Nebula_Drift-macOS.zip

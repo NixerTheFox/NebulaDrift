@@ -17,7 +17,6 @@ Download `Nebula_Drift-macOS.zip` from the [latest release](https://github.com/N
 - Apple's command line tools (`xcode-select --install`) for `swiftc`
 
 ### Build and run
-release
 ```bash
 ./build.sh
 open "build/Nebula Drift.app"

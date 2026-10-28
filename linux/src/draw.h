@@ -120,3 +120,5 @@ struct LCG {
 
 /// A uniformly random float in [a, b].
 float frand(float a, float b);
+/// Makes frand repeatable on this thread (for test renders).
+void seedRandom(unsigned seed);

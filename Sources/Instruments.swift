@@ -57,7 +57,35 @@ final class InstrumentPanel {
     private var knobSpin: [CGFloat] = [0, 0, 0]
     private var distance: Double = 0 // travelled, in "AU", shown on the drum counter
 
-    private var cache: (size: CGSize, layer: CGLayer)?
+    /// Everything that can be drawn once per window size and scale, then stamped every frame.
+    private struct Caches {
+        var size: CGSize
+        var scale: CGFloat
+        var strip: CGRect           // the console strip, in its own coordinates
+        var back: CGImage           // all that never moves
+        /// Unchanging parts lying over moving ones, cut to where they go: the three meters (shroud and gloss),
+        /// the four tubes (cage and glass), the drum counter (gaps and curvature) and the scope (scanlines and glass).
+        var fronts: [Sprite]
+        var litFaces: [Sprite]      // meter faces lit by their bulbs at full strength
+        var hazedTubes: [Sprite]    // tubes filled with neon haze at full strength
+        var lever: Sprite           // throttle grip with its stem and shadow, from the grip's top-left corner
+        var cap: Sprite             // fader cap with its shadow, from the cap's top-left corner
+        var bulb: Sprite            // a meter bulb with its glow, from its centre
+        var dot: Sprite             // the Nixie decimal point, lit, from its top-left corner
+        var digits: [Sprite]        // lit Nixie numerals, from the digit box's top-left corner
+        var drumDigits: [[CGImage]] // distance counter figures: [white, red][0...9], one drum cell each
+        var alarm: [Sprite]         // the alarm banner, dim and flashing, in view coordinates
+        var lamps: [Int: Sprite] = [:] // status lamps by kind and warmth step, from the lamp's centre
+    }
+
+    /// A pre-rendered image and where it goes, relative to an anchor point.
+    private struct Sprite {
+        var image: CGImage
+        var rect: CGRect
+    }
+
+    private var caches: Caches?
+    private var colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
     // MARK: Update
 
@@ -174,24 +202,18 @@ final class InstrumentPanel {
     /// Draws the console along the bottom of a view of `viewSize`. `ctx` must be y-down.
     func draw(in ctx: CGContext, viewSize: CGSize) {
         let l = layout(for: viewSize)
-        let stripSize = CGSize(width: viewSize.width, height: l.stripHeight)
-        if cache?.size != stripSize, let layer = CGLayer(ctx, size: stripSize, auxiliaryInfo: nil),
-           let lctx = layer.context {
-            lctx.translateBy(x: 0, y: stripSize.height)
-            lctx.scaleBy(x: 1, y: -1)
-            withAppKitContext(lctx) { drawStatic(lctx, l, width: viewSize.width) }
-            cache = (stripSize, layer)
+        let t = ctx.userSpaceToDeviceSpaceTransform
+        let scale = max((t.a * t.a + t.b * t.b).squareRoot(), 1)
+        if caches?.size != viewSize || caches?.scale != scale {
+            colorSpace = ctx.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+            caches = makeCaches(l, viewSize: viewSize, scale: scale)
         }
+        guard var k = caches else { return }
         ctx.saveGState()
         ctx.translateBy(x: 0, y: viewSize.height - l.stripHeight)
-        if let layer = cache?.layer {
-            ctx.saveGState()
-            ctx.translateBy(x: 0, y: l.stripHeight)
-            ctx.scaleBy(x: 1, y: -1)
-            ctx.draw(layer, at: .zero)
-            ctx.restoreGState()
-        }
-        withAppKitContext(ctx) { drawDynamic(ctx, l) }
+        drawImage(ctx, k.back, in: k.strip)
+        withAppKitContext(ctx) { drawDynamic(ctx, l, &k) }
+        caches = k
         ctx.restoreGState()
         if chaos > 0.02 { withAppKitContext(ctx) { drawAlarm(ctx, viewSize: viewSize) } }
     }
@@ -199,9 +221,24 @@ final class InstrumentPanel {
     /// Flashing master alarm across the top of the view while tidal forces grip the ship.
     private func drawAlarm(_ c: CGContext, viewSize: CGSize) {
         let flash = sin(time * 11) > -0.1
-        let w = min(viewSize.width * 0.62, 760), h = max(44, min(viewSize.height * 0.075, 70))
-        let r = CGRect(x: (viewSize.width - w) / 2, y: viewSize.height * 0.09, width: w, height: h)
+        let r = Self.alarmRect(viewSize)
         let a = CGFloat(min(chaos * 2, 1))
+        // The banner itself (glow, stripes and frame) is drawn once in each of its two states and faded in.
+        if let k = caches { drawSprite(c, k.alarm[flash ? 1 : 0], at: .zero, alpha: a) }
+        let color = NSColor(red: 1, green: flash ? 0.92 : 0.35, blue: flash ? 0.85 : 0.3, alpha: a)
+        text("⚠  GRAVITATIONAL ANOMALY  —  TIDAL STRESS \(Int(chaos * 100))%  ⚠", CGPoint(x: r.midX, y: r.midY),
+             size: r.height * 0.42, color: color)
+    }
+
+    private static func alarmRect(_ viewSize: CGSize) -> CGRect {
+        let w = min(viewSize.width * 0.62, 760), h = max(44, min(viewSize.height * 0.075, 70))
+        return CGRect(x: (viewSize.width - w) / 2, y: viewSize.height * 0.09, width: w, height: h)
+    }
+
+    /// The alarm banner without its text, fully faded in.
+    private func drawAlarmBanner(_ c: CGContext, _ r: CGRect, flash: Bool) {
+        let h = r.height
+        let a: CGFloat = 1
         let path = CGPath(roundedRect: r, cornerWidth: 6, cornerHeight: 6, transform: nil)
         c.saveGState()
         c.setShadow(offset: .zero, blur: flash ? 30 : 8, color: rgb(1, 0.1, 0.05, (flash ? 0.9 : 0.3) * a))
@@ -230,9 +267,6 @@ final class InstrumentPanel {
         c.setStrokeColor(rgb(1, 0.25, 0.2, a))
         c.setLineWidth(2)
         c.strokePath()
-        let color = NSColor(red: 1, green: flash ? 0.92 : 0.35, blue: flash ? 0.85 : 0.3, alpha: a)
-        text("⚠  GRAVITATIONAL ANOMALY  —  TIDAL STRESS \(Int(chaos * 100))%  ⚠", CGPoint(x: r.midX, y: r.midY),
-             size: h * 0.42, color: color)
     }
 
     /// Whether the alarm banner (drawn outside the console strip) needs redrawing.
@@ -634,6 +668,14 @@ final class InstrumentPanel {
         bezelRect(c, win.insetBy(dx: -0.012 * u, dy: -0.012 * u), u)
         c.setFillColor(rgb(0.02, 0.02, 0.02))
         c.fill(win)
+        // The drums themselves (their figures are drawn every frame).
+        let n = counterDigits(win)
+        let dw = win.width / CGFloat(n)
+        for i in 0..<n {
+            let cell = CGRect(x: win.minX + CGFloat(i) * dw, y: win.minY, width: dw, height: win.height)
+            linearGradient(c, cell.insetBy(dx: 1, dy: 0), [rgb(0.05, 0.05, 0.05), rgb(0.16, 0.16, 0.15), rgb(0.05, 0.05, 0.05)],
+                           vertical: true)
+        }
     }
 
     /// The counter window spans the whole row beneath the tubes (after the DIST/AU label).
@@ -787,136 +829,77 @@ final class InstrumentPanel {
 
     // MARK: Moving parts (every frame)
 
-    private func drawDynamic(_ c: CGContext, _ l: Layout) {
+    private func drawDynamic(_ c: CGContext, _ l: Layout, _ k: inout Caches) {
         let u = l.u
 
         // Throttle levers.
-        for k in 0..<2 {
-            let slot = leverSlot(content(l.levers, u), k, u)
-            let v = CGFloat(min(max(levers[k].pos, 0), 1.05))
+        for i in 0..<2 {
+            let slot = leverSlot(content(l.levers, u), i, u)
+            let v = CGFloat(min(max(levers[i].pos, 0), 1.05))
             let y = slot.maxY - slot.width / 2 - v * (slot.height - slot.width)
-            let grip = CGRect(x: slot.midX - 0.11 * u, y: y - 0.035 * u, width: 0.22 * u, height: 0.07 * u)
-            c.saveGState()
-            c.setShadow(offset: CGSize(width: 0, height: 0.02 * u), blur: 0.035 * u, color: rgb(0, 0, 0, 0.8))
-            c.setFillColor(rgb(0.25, 0.25, 0.25))
-            c.fill(CGRect(x: slot.midX - 0.012 * u, y: y - 0.02 * u, width: 0.024 * u, height: 0.04 * u))
-            let gp = CGPath(roundedRect: grip, cornerWidth: 0.03 * u, cornerHeight: 0.03 * u, transform: nil)
-            c.addPath(gp)
-            c.setFillColor(rgb(0.55, 0.08, 0.06))
-            c.fillPath()
-            c.restoreGState()
-            c.saveGState()
-            c.addPath(CGPath(roundedRect: grip, cornerWidth: 0.03 * u, cornerHeight: 0.03 * u, transform: nil))
-            c.clip()
-            linearGradient(c, grip, [rgb(0.85, 0.22, 0.15), rgb(0.4, 0.05, 0.04)], vertical: true)
-            c.setStrokeColor(rgb(0, 0, 0, 0.35))
-            c.setLineWidth(1)
-            var gx = grip.minX + 0.03 * u
-            while gx < grip.maxX - 0.02 * u {
-                c.move(to: CGPoint(x: gx, y: grip.minY))
-                c.addLine(to: CGPoint(x: gx, y: grip.maxY))
-                gx += 0.025 * u
-            }
-            c.strokePath()
-            c.restoreGState()
+            drawSprite(c, k.lever, at: CGPoint(x: slot.midX - 0.11 * u, y: y - 0.035 * u))
         }
 
         // VU gauges.
-        for k in 0..<3 {
-            let face = gaugeFace(l, k).insetBy(dx: 0.025 * u, dy: 0.025 * u)
+        for i in 0..<3 {
+            let face = gaugeFace(l, i).insetBy(dx: 0.025 * u, dy: 0.025 * u)
             let (pivot, R) = gaugeGeometry(face)
+            // Light from one small warm bulb behind the bottom-centre of the face, faded in over the unlit face.
+            let b = CGFloat(bulb) * CGFloat(Float.random(in: 0.97...1.0))
+            drawSprite(c, k.litFaces[i], at: .zero, alpha: b)
             c.saveGState()
             c.addPath(CGPath(roundedRect: face, cornerWidth: 0.02 * u, cornerHeight: 0.02 * u, transform: nil))
             c.clip()
-            // Light from one small warm bulb behind the bottom-centre of the face.
-            let b = CGFloat(bulb) * CGFloat(Float.random(in: 0.97...1.0))
-            let bulbAt = CGPoint(x: face.midX, y: face.maxY - face.height * 0.04)
-            c.saveGState()
-            c.setBlendMode(.screen)
-            let light = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                   colors: [rgb(1, 0.78, 0.45, 0.55 * b), rgb(0.95, 0.6, 0.28, 0.3 * b),
-                                            rgb(0.8, 0.45, 0.2, 0)] as CFArray, locations: [0, 0.45, 1])!
-            c.drawRadialGradient(light, startCenter: bulbAt, startRadius: 0, endCenter: bulbAt,
-                                 endRadius: face.height * 1.15, options: [])
-            c.restoreGState()
-            let a = gaugeAngle(CGFloat(min(max(gauges[k].pos, -0.03), 1.06)))
-            // The needle casts a long shadow away from the bulb.
-            c.setShadow(offset: CGSize(width: 0, height: -0.012 * u), blur: 0.012 * u, color: rgb(0, 0, 0, 0.45))
+            let a = gaugeAngle(CGFloat(min(max(gauges[i].pos, -0.03), 1.06)))
+            // The needle casts a long shadow away from the bulb: soft lines (blurring it every frame costs too much).
+            let needleW = max(1.2, 0.009 * u), soft = 0.006 * u
+            let shadowPivot = CGPoint(x: pivot.x, y: pivot.y - 0.012 * u)
+            c.setLineCap(.round)
+            for (extra, alpha) in [(CGFloat(3), CGFloat(0.14)), (1.2, 0.22)] {
+                c.setStrokeColor(rgb(0, 0, 0, alpha))
+                c.setLineWidth(needleW + extra * soft)
+                c.move(to: shadowPivot)
+                c.addLine(to: polar(shadowPivot, R * 0.94, a))
+                c.strokePath()
+            }
+            c.setLineCap(.butt)
             c.setStrokeColor(rgb(0.12, 0.08, 0.06))
-            c.setLineWidth(max(1.2, 0.009 * u))
+            c.setLineWidth(needleW)
             c.move(to: pivot)
             c.addLine(to: polar(pivot, R * 0.94, a))
             c.strokePath()
-            c.setShadow(offset: .zero, blur: 0)
-            // Shroud along the bottom hiding the bulb, which peeks over its edge.
-            let shroud = CGRect(x: face.minX, y: face.maxY - face.height * 0.1, width: face.width, height: face.height * 0.1)
-            linearGradient(c, shroud, [rgb(0.1, 0.09, 0.08), rgb(0.03, 0.03, 0.03)], vertical: true)
-            c.saveGState()
-            c.setShadow(offset: .zero, blur: 0.03 * u, color: rgb(1, 0.7, 0.35, 0.8 * b))
-            c.setFillColor(rgb(1, 0.88, 0.65, b))
-            c.fillEllipse(in: CGRect(x: bulbAt.x - 0.016 * u, y: shroud.minY - 0.008 * u, width: 0.032 * u, height: 0.016 * u))
-            c.restoreGState()
-            linearGradient(c, face, [rgb(1, 1, 1, 0.1), rgb(1, 1, 1, 0)], vertical: false, endFraction: 0.55)
+            // Shroud along the bottom hiding the bulb, and the glass (cached); the bulb peeks over the shroud.
+            drawFront(c, k, Front.gauge + i)
+            drawSprite(c, k.bulb, at: CGPoint(x: face.midX, y: face.maxY - face.height * 0.1), alpha: b)
             c.restoreGState()
         }
 
         // Velocity on the Nixie tubes, "00.00" to "10.00" (fractions of light speed). Under tidal stress they scramble.
-        c.setLineCap(.round)
-        c.setLineJoin(.round)
-        for (k, tube) in nixieTubes(l).enumerated() {
+        for (i, tube) in nixieTubes(l).enumerated() {
             let g = nixieGlass(tube)
             let box = digitBox(g)
             let lit = CGFloat(Float.random(in: 0.92...1.0)) * (chaos > 0.02 && Float.random(in: 0...1) < chaos * 0.3 ? 0.2 : 1)
-            let (nr, ng, nb) = Self.neon
-            c.saveGState()
-            c.addPath(nixieGlassPath(g))
-            c.clip()
             // Neon haze filling the glass around the glowing cathode.
-            let center = CGPoint(x: box.midX, y: box.midY)
-            let haze = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                  colors: [rgb(nr, ng, nb, 0.16 * lit), rgb(nr, ng * 0.8, nb, 0)] as CFArray, locations: nil)!
-            c.drawRadialGradient(haze, startCenter: center, startRadius: 0, endCenter: center, endRadius: box.height * 0.8,
-                                 options: [])
-            // The lit numeral: a wide soft bloom, the orange glow, then the hot core of the wire.
+            drawSprite(c, k.hazedTubes[i], at: .zero, alpha: lit)
+            // The glass has straight sides and the digits sit well below its dome: a rectangular clip does the same
+            // job as the glass outline here, and is far cheaper to draw through.
+            c.saveGState()
+            c.clip(to: g)
             // The previous cathode's afterglow, then the new one igniting.
-            let age = CGFloat(nixieAge[k])
+            let age = CGFloat(nixieAge[i])
             let ignite = min(age / 0.06, 1) * lit
             let after = max(1 - age / 0.18, 0) * 0.6 * lit
-            for (d, glow) in [(nixiePrevious[k], after), (nixieDigits[k], ignite)] where glow > 0.01 {
-                let digit = nixieDigit(d, in: box)
-                for (width, color, blur) in [(box.height * 0.1, rgb(nr, ng, nb, 0.16 * glow), box.height * 0.14),
-                                             (box.height * 0.05, rgb(nr, ng + 0.05, nb, 0.9 * glow), box.height * 0.04),
-                                             (box.height * 0.02, rgb(1, 0.8, 0.55, glow), CGFloat(0))] {
-                    c.saveGState()
-                    if blur > 0 { c.setShadow(offset: .zero, blur: blur, color: rgb(nr, ng, nb, 0.7 * glow)) }
-                    c.addPath(digit)
-                    c.setStrokeColor(color)
-                    c.setLineWidth(max(0.8, width))
-                    c.strokePath()
-                    c.restoreGState()
-                }
+            for (d, glow) in [(nixiePrevious[i], after), (nixieDigits[i], ignite)] where glow > 0.01 {
+                drawSprite(c, k.digits[d], at: box.origin, alpha: glow)
             }
             // Decimal point cathode after the second digit.
-            if k == 1 {
+            if i == 1 {
                 let r = box.height * 0.045
-                let dot = CGRect(x: g.maxX - g.width * 0.13 - r, y: box.maxY - r, width: 2 * r, height: 2 * r)
-                c.saveGState()
-                c.setShadow(offset: .zero, blur: box.height * 0.08, color: rgb(nr, ng, nb, lit))
-                c.setFillColor(rgb(1, 0.7, 0.4, lit))
-                c.fillEllipse(in: dot)
-                c.restoreGState()
+                drawSprite(c, k.dot, at: CGPoint(x: g.maxX - g.width * 0.13 - r, y: box.maxY - r), alpha: lit)
             }
-            // Front of the anode cage, faintly lit by the glow behind it.
-            nixieMesh(c, g, rgb(0.9, 0.55, 0.3, 0.13))
-            // Reflections on the curved glass: a bright band on one side, a faint one on the other.
-            linearGradient(c, CGRect(x: g.minX + g.width * 0.08, y: g.minY, width: g.width * 0.14, height: g.height),
-                           [rgb(1, 1, 1, 0.22), rgb(1, 1, 1, 0.02)], vertical: false)
-            linearGradient(c, CGRect(x: g.maxX - g.width * 0.16, y: g.minY, width: g.width * 0.08, height: g.height),
-                           [rgb(1, 1, 1, 0.0), rgb(1, 1, 1, 0.1)], vertical: false)
+            drawFront(c, k, Front.tube + i) // the cage and glass in front
             c.restoreGState()
         }
-        c.setLineCap(.butt)
-        c.setLineJoin(.miter)
 
         // Distance drum counter: white figures on black drums; the last drum rolls continuously.
         let win = counterWindow(l)
@@ -933,38 +916,23 @@ final class InstrumentPanel {
             // Only the last drum rolls smoothly; the others flip when the one to their right wraps (like a real counter).
             var roll: CGFloat = place == 0 ? frac : 0
             if place > 0 && (whole % power) == power - 1 { roll = frac }
-            let cell = CGRect(x: win.minX + CGFloat(i) * dw, y: win.minY, width: dw, height: win.height)
-            linearGradient(c, cell.insetBy(dx: 1, dy: 0), [rgb(0.05, 0.05, 0.05), rgb(0.16, 0.16, 0.15), rgb(0.05, 0.05, 0.05)],
-                           vertical: true)
             for (offset, value) in [(CGFloat(0), digit), (CGFloat(1), (digit + 1) % 10)] {
-                let y = cell.midY + (offset - roll) * cell.height
-                text("\(value)", CGPoint(x: cell.midX, y: y), size: cell.height * 0.78,
-                     color: i == n - 1 ? NSColor(red: 0.95, green: 0.35, blue: 0.25, alpha: 1)
-                                       : NSColor(red: 0.93, green: 0.91, blue: 0.85, alpha: 1))
+                let y = win.minY + (offset - roll) * win.height
+                drawImage(c, k.drumDigits[i == n - 1 ? 1 : 0][value],
+                          in: CGRect(x: win.minX + CGFloat(i) * dw, y: y, width: dw, height: win.height))
             }
-            c.setFillColor(rgb(0, 0, 0, 0.6))
-            c.fill(CGRect(x: cell.maxX - 0.5, y: cell.minY, width: 1, height: cell.height))
         }
-        // Drum curvature: dark at the top and bottom of the window.
-        linearGradient(c, win, [rgb(0, 0, 0, 0.75), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.75)], vertical: true)
+        drawFront(c, k, Front.drum) // the gaps between drums and their curvature
         c.restoreGState()
 
         // Fader caps.
         let (_, cw) = faderColumns(l)
-        for k in 0..<Self.faderCount {
-            let t = faderTrack(l, k)
-            let v = CGFloat(min(max(faders[k].pos, 0), 1))
+        for i in 0..<Self.faderCount {
+            let t = faderTrack(l, i)
+            let v = CGFloat(min(max(faders[i].pos, 0), 1))
             let y = t.bottom - v * (t.bottom - t.top)
             let capW = min(cw * 0.72, 0.075 * u), capH = 0.05 * u
-            let cap = CGRect(x: t.x - capW / 2, y: y - capH / 2, width: capW, height: capH)
-            c.saveGState()
-            c.setShadow(offset: CGSize(width: 0, height: 0.012 * u), blur: 0.02 * u, color: rgb(0, 0, 0, 0.8))
-            c.setFillColor(rgb(0.5, 0.5, 0.48))
-            c.fill(cap)
-            c.restoreGState()
-            linearGradient(c, cap, [rgb(0.78, 0.78, 0.75), rgb(0.3, 0.3, 0.29)], vertical: true)
-            c.setFillColor(rgb(1, 1, 1, 0.9))
-            c.fill(CGRect(x: cap.minX + 1, y: cap.midY - 0.5, width: cap.width - 2, height: 1.2))
+            drawSprite(c, k.cap, at: CGPoint(x: t.x - capW / 2, y: y - capH / 2))
         }
 
         // Scope traces: spectrum, plus a bass-driven sine sweep.
@@ -1006,12 +974,7 @@ final class InstrumentPanel {
             c.setLineWidth(max(1, 0.008 * u))
             c.strokePath()
         }
-        c.setFillColor(rgb(0, 0, 0, 0.18))
-        var sy = s.minY
-        while sy < s.maxY {
-            c.fill(CGRect(x: s.minX, y: sy, width: s.width, height: 1))
-            sy += 3
-        }
+        drawFront(c, k, Front.scope) // scanlines and glass
         if chaos > 0.02 && sin(time * 14) > -0.2 {
             c.setFillColor(rgb(0.6, 0.02, 0.02, 0.45 * CGFloat(chaos)))
             c.fill(s)
@@ -1020,43 +983,304 @@ final class InstrumentPanel {
             text("TIDAL STRESS \(Int(chaos * 100))%", CGPoint(x: s.midX, y: s.midY + s.height * 0.22),
                  size: s.height * 0.16, color: NSColor(red: 1, green: 0.5, blue: 0.4, alpha: 1))
         }
-        linearGradient(c, s, [rgb(1, 1, 1, 0.08), rgb(1, 1, 1, 0)], vertical: true, endFraction: 0.5)
         c.restoreGState()
 
         // Knob pointers.
-        for k in 0..<3 {
-            let (center, kr) = knobGeometry(l, k)
+        for i in 0..<3 {
+            let (center, kr) = knobGeometry(l, i)
             c.setStrokeColor(rgb(0.95, 0.93, 0.85))
             c.setLineWidth(max(1.5, 0.012 * u))
             c.setLineCap(.round)
-            c.move(to: polar(center, kr * 0.25, knobAngles[k]))
-            c.addLine(to: polar(center, kr * 0.72, knobAngles[k]))
+            c.move(to: polar(center, kr * 0.25, knobAngles[i]))
+            c.addLine(to: polar(center, kr * 0.72, knobAngles[i]))
             c.strokePath()
         }
         c.setLineCap(.butt)
 
-        // Lamps.
-        let lit = lampGlow
-        let colors: [(CGFloat, CGFloat, CGFloat)] = [(1, 0.62, 0.15), (0.35, 1, 0.45), (0.35, 1, 0.45), (0.35, 1, 0.45)]
+        // Lamps: each kind and warmth step (of 16) is drawn once, glow and all.
         for (i, lamp) in lampGeometry(l).enumerated() {
-            let (r, g, b) = colors[i]
-            let on = CGFloat(min(max(lit[i], 0), 1))
-            let rect = CGRect(x: lamp.center.x - lamp.radius, y: lamp.center.y - lamp.radius,
-                              width: 2 * lamp.radius, height: 2 * lamp.radius)
+            let step = Int((CGFloat(min(max(lampGlow[i], 0), 1)) * 16).rounded())
+            let key = (i == 0 ? 0 : 100) + step
+            if k.lamps[key] == nil { k.lamps[key] = makeLamp(i, lamp.radius, on: CGFloat(step) / 16, scale: k.scale) }
+            if let sprite = k.lamps[key] { drawSprite(c, sprite, at: lamp.center) }
+        }
+    }
+
+    // MARK: Caches
+
+    /// Renders `body` (y-down, in points, from `rect`'s origin) into an image at `scale`.
+    private func render(_ rect: CGRect, scale: CGFloat, _ body: (CGContext) -> Void) -> CGImage? {
+        let w = max(Int((rect.width * scale).rounded(.up)), 1), h = max(Int((rect.height * scale).rounded(.up)), 1)
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                                  bitmapInfo: info)
+                ?? CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.translateBy(x: -rect.minX, y: -rect.minY)
+        withAppKitContext(ctx) { body(ctx) }
+        return ctx.makeImage()
+    }
+
+    /// A sprite of what `body` draws within `bounds`, positioned relative to `anchor`.
+    private func makeSprite(_ bounds: CGRect, anchor: CGPoint, scale: CGFloat, _ body: (CGContext) -> Void) -> Sprite {
+        let r = bounds.integral
+        let image = render(r, scale: scale, body) ?? render(CGRect(x: 0, y: 0, width: 1, height: 1), scale: 1) { _ in }!
+        return Sprite(image: image, rect: r.offsetBy(dx: -anchor.x, dy: -anchor.y))
+    }
+
+    /// Draws an image upright into `rect` of a y-down context.
+    private func drawImage(_ c: CGContext, _ image: CGImage, in rect: CGRect, alpha: CGFloat = 1) {
+        guard alpha > 0.002 else { return }
+        c.saveGState()
+        if alpha < 1 { c.setAlpha(alpha) }
+        c.translateBy(x: rect.minX, y: rect.maxY)
+        c.scaleBy(x: 1, y: -1)
+        c.interpolationQuality = .none
+        c.draw(image, in: CGRect(origin: .zero, size: rect.size))
+        c.restoreGState()
+    }
+
+    private func drawSprite(_ c: CGContext, _ sprite: Sprite, at anchor: CGPoint, alpha: CGFloat = 1) {
+        drawImage(c, sprite.image, in: sprite.rect.offsetBy(dx: anchor.x, dy: anchor.y), alpha: alpha)
+    }
+
+    private enum Front {
+        static let gauge = 0, tube = 3, drum = 7, scope = 8
+    }
+
+    /// Paints the piece of the front layer over one instrument. (Small pieces: Core Graphics processes a whole
+    /// image on every draw, however tightly it is clipped.)
+    private func drawFront(_ c: CGContext, _ k: Caches, _ index: Int) {
+        drawSprite(c, k.fronts[index], at: .zero)
+    }
+
+    private func makeCaches(_ l: Layout, viewSize: CGSize, scale: CGFloat) -> Caches? {
+        let u = l.u
+        let strip = CGRect(x: 0, y: 0, width: viewSize.width, height: l.stripHeight)
+        guard let back = render(strip, scale: scale, { drawStatic($0, l, width: viewSize.width) }),
+              let front = render(strip, scale: scale, { drawFronts($0, l) }) else { return nil }
+        // The unlit panel under a glow, so the glow can be faded in over it.
+        func lit(_ r: CGRect, _ shape: CGPath, _ effect: (CGContext) -> Void) -> Sprite {
+            makeSprite(r, anchor: .zero, scale: scale) { c in
+                c.addPath(shape)
+                c.clip()
+                self.drawImage(c, back, in: strip)
+                effect(c)
+            }
+        }
+        let litFaces = (0..<3).map { i -> Sprite in
+            let face = gaugeFace(l, i).insetBy(dx: 0.025 * u, dy: 0.025 * u)
+            let bulbAt = CGPoint(x: face.midX, y: face.maxY - face.height * 0.04)
+            return lit(face, CGPath(roundedRect: face, cornerWidth: 0.02 * u, cornerHeight: 0.02 * u, transform: nil)) { c in
+                c.setBlendMode(.screen)
+                let light = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                       colors: [rgb(1, 0.78, 0.45, 0.55), rgb(0.95, 0.6, 0.28, 0.3),
+                                                rgb(0.8, 0.45, 0.2, 0)] as CFArray, locations: [0, 0.45, 1])!
+                c.drawRadialGradient(light, startCenter: bulbAt, startRadius: 0, endCenter: bulbAt,
+                                     endRadius: face.height * 1.15, options: [])
+            }
+        }
+        let (nr, ng, nb) = Self.neon
+        let tubes = nixieTubes(l)
+        let hazedTubes = tubes.map { tube -> Sprite in
+            let g = nixieGlass(tube)
+            let box = digitBox(g)
+            return lit(g, nixieGlassPath(g)) { c in
+                let center = CGPoint(x: box.midX, y: box.midY)
+                let haze = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                      colors: [rgb(nr, ng, nb, 0.16), rgb(nr, ng * 0.8, nb, 0)] as CFArray, locations: nil)!
+                c.drawRadialGradient(haze, startCenter: center, startRadius: 0, endCenter: center,
+                                     endRadius: box.height * 0.8, options: [])
+            }
+        }
+
+        // Throttle grip, with its stem and drop shadow.
+        let grip = CGRect(x: 0, y: 0, width: 0.22 * u, height: 0.07 * u)
+        let lever = makeSprite(grip.insetBy(dx: -0.1 * u, dy: -0.1 * u), anchor: .zero, scale: scale) { c in
+            c.saveGState()
+            c.setShadow(offset: CGSize(width: 0, height: 0.02 * u), blur: 0.035 * u, color: self.rgb(0, 0, 0, 0.8))
+            c.setFillColor(self.rgb(0.25, 0.25, 0.25))
+            c.fill(CGRect(x: 0.098 * u, y: 0.015 * u, width: 0.024 * u, height: 0.04 * u))
+            c.addPath(CGPath(roundedRect: grip, cornerWidth: 0.03 * u, cornerHeight: 0.03 * u, transform: nil))
+            c.setFillColor(self.rgb(0.55, 0.08, 0.06))
+            c.fillPath()
+            c.restoreGState()
+            c.saveGState()
+            c.addPath(CGPath(roundedRect: grip, cornerWidth: 0.03 * u, cornerHeight: 0.03 * u, transform: nil))
+            c.clip()
+            self.linearGradient(c, grip, [self.rgb(0.85, 0.22, 0.15), self.rgb(0.4, 0.05, 0.04)], vertical: true)
+            c.setStrokeColor(self.rgb(0, 0, 0, 0.35))
+            c.setLineWidth(1)
+            var gx = grip.minX + 0.03 * u
+            while gx < grip.maxX - 0.02 * u {
+                c.move(to: CGPoint(x: gx, y: grip.minY))
+                c.addLine(to: CGPoint(x: gx, y: grip.maxY))
+                gx += 0.025 * u
+            }
+            c.strokePath()
+            c.restoreGState()
+        }
+
+        // Fader cap.
+        let capRect = CGRect(x: 0, y: 0, width: min(faderColumns(l).width * 0.72, 0.075 * u), height: 0.05 * u)
+        let cap = makeSprite(capRect.insetBy(dx: -0.06 * u, dy: -0.06 * u), anchor: .zero, scale: scale) { c in
+            c.saveGState()
+            c.setShadow(offset: CGSize(width: 0, height: 0.012 * u), blur: 0.02 * u, color: self.rgb(0, 0, 0, 0.8))
+            c.setFillColor(self.rgb(0.5, 0.5, 0.48))
+            c.fill(capRect)
+            c.restoreGState()
+            self.linearGradient(c, capRect, [self.rgb(0.78, 0.78, 0.75), self.rgb(0.3, 0.3, 0.29)], vertical: true)
+            c.setFillColor(self.rgb(1, 1, 1, 0.9))
+            c.fill(CGRect(x: capRect.minX + 1, y: capRect.midY - 0.5, width: capRect.width - 2, height: 1.2))
+        }
+
+        // Meter bulb peeking over the shroud, with its glow (anchored at the top of the shroud, centred).
+        let bulbRect = CGRect(x: -0.016 * u, y: -0.008 * u, width: 0.032 * u, height: 0.016 * u)
+        let bulb = makeSprite(bulbRect.insetBy(dx: -0.08 * u, dy: -0.08 * u), anchor: .zero, scale: scale) { c in
+            c.setShadow(offset: .zero, blur: 0.03 * u, color: self.rgb(1, 0.7, 0.35, 0.8))
+            c.setFillColor(self.rgb(1, 0.88, 0.65))
+            c.fillEllipse(in: bulbRect)
+        }
+
+        // Lit Nixie numerals: a wide soft bloom, the orange glow, then the hot core of the wire.
+        let box = digitBox(nixieGlass(tubes[0]))
+        let boxAt0 = CGRect(origin: .zero, size: box.size)
+        let digits = (0...9).map { d -> Sprite in
+            makeSprite(boxAt0.insetBy(dx: -box.height * 0.4, dy: -box.height * 0.4), anchor: .zero, scale: scale) { c in
+                c.setLineCap(.round)
+                c.setLineJoin(.round)
+                let digit = self.nixieDigit(d, in: boxAt0)
+                for (width, color, blur) in [(box.height * 0.1, self.rgb(nr, ng, nb, 0.16), box.height * 0.14),
+                                             (box.height * 0.05, self.rgb(nr, ng + 0.05, nb, 0.9), box.height * 0.04),
+                                             (box.height * 0.02, self.rgb(1, 0.8, 0.55), CGFloat(0))] {
+                    c.saveGState()
+                    if blur > 0 { c.setShadow(offset: .zero, blur: blur, color: self.rgb(nr, ng, nb, 0.7)) }
+                    c.addPath(digit)
+                    c.setStrokeColor(color)
+                    c.setLineWidth(max(0.8, width))
+                    c.strokePath()
+                    c.restoreGState()
+                }
+            }
+        }
+        let r = box.height * 0.045
+        let dotRect = CGRect(x: 0, y: 0, width: 2 * r, height: 2 * r)
+        let dot = makeSprite(dotRect.insetBy(dx: -box.height * 0.25, dy: -box.height * 0.25), anchor: .zero, scale: scale) { c in
+            c.setShadow(offset: .zero, blur: box.height * 0.08, color: self.rgb(nr, ng, nb, 1))
+            c.setFillColor(self.rgb(1, 0.7, 0.4))
+            c.fillEllipse(in: dotRect)
+        }
+
+        // Distance counter figures, one drum cell each.
+        let win = counterWindow(l)
+        let cell = CGRect(x: 0, y: 0, width: win.width / CGFloat(counterDigits(win)), height: win.height)
+        let drumDigits = [NSColor(red: 0.93, green: 0.91, blue: 0.85, alpha: 1), NSColor(red: 0.95, green: 0.35, blue: 0.25, alpha: 1)]
+            .map { color in
+                (0...9).map { value in
+                    render(cell, scale: scale) { _ in
+                        self.text("\(value)", CGPoint(x: cell.midX, y: cell.midY), size: cell.height * 0.78, color: color)
+                    }!
+                }
+            }
+
+        let banner = Self.alarmRect(viewSize)
+        let alarm = [false, true].map { flash in
+            makeSprite(banner.insetBy(dx: -50, dy: -50), anchor: .zero, scale: scale) { c in
+                self.drawAlarmBanner(c, banner, flash: flash)
+            }
+        }
+
+        // The front layer, cut into the pieces drawFront paints.
+        func piece(_ r: CGRect) -> Sprite {
+            let x0 = (r.minX * scale).rounded(.down), y0 = (r.minY * scale).rounded(.down)
+            let px = CGRect(x: x0, y: y0, width: (r.maxX * scale).rounded(.up) - x0, height: (r.maxY * scale).rounded(.up) - y0)
+            return Sprite(image: front.cropping(to: px) ?? front,
+                          rect: CGRect(x: px.minX / scale, y: px.minY / scale, width: px.width / scale, height: px.height / scale))
+        }
+        var fronts = (0..<3).map { piece(gaugeFace(l, $0).insetBy(dx: 0.025 * u, dy: 0.025 * u)) }
+        fronts += tubes.map { piece(nixieGlass($0)) }
+        fronts += [piece(counterWindow(l)), piece(scopeScreen(l))]
+
+        return Caches(size: viewSize, scale: scale, strip: strip, back: back, fronts: fronts, litFaces: litFaces,
+                      hazedTubes: hazedTubes, lever: lever, cap: cap, bulb: bulb, dot: dot, digits: digits,
+                      drumDigits: drumDigits, alarm: alarm)
+    }
+
+    /// A status lamp at a given warmth, with its glow, anchored at its centre.
+    private func makeLamp(_ i: Int, _ radius: CGFloat, on: CGFloat, scale: CGFloat) -> Sprite {
+        let colors: [(CGFloat, CGFloat, CGFloat)] = [(1, 0.62, 0.15), (0.35, 1, 0.45), (0.35, 1, 0.45), (0.35, 1, 0.45)]
+        let (r, g, b) = colors[i]
+        let rect = CGRect(x: -radius, y: -radius, width: 2 * radius, height: 2 * radius)
+        return makeSprite(rect.insetBy(dx: -radius * 6, dy: -radius * 6), anchor: .zero, scale: scale) { c in
             c.saveGState()
             if on > 0.05 {
-                c.setShadow(offset: .zero, blur: lamp.radius * 2.4 * on, color: rgb(r, g, b, 0.55 * on))
+                c.setShadow(offset: .zero, blur: radius * 2.4 * on, color: self.rgb(r, g, b, 0.55 * on))
             }
             c.addEllipse(in: rect)
             let k = 0.18 + 0.82 * on
-            c.setFillColor(rgb(r * k, g * k, b * k))
+            c.setFillColor(self.rgb(r * k, g * k, b * k))
             c.fillPath()
             c.restoreGState()
-            c.addEllipse(in: rect.insetBy(dx: lamp.radius * 0.45, dy: lamp.radius * 0.45)
-                .offsetBy(dx: -lamp.radius * 0.2, dy: -lamp.radius * 0.25))
-            c.setFillColor(rgb(1, 1, 1, 0.25 + 0.35 * on))
+            c.addEllipse(in: rect.insetBy(dx: radius * 0.45, dy: radius * 0.45).offsetBy(dx: -radius * 0.2, dy: -radius * 0.25))
+            c.setFillColor(self.rgb(1, 1, 1, 0.25 + 0.35 * on))
             c.fillPath()
         }
+    }
+
+    /// Unchanging parts that lie over moving ones, drawn once and painted after what they cover.
+    private func drawFronts(_ c: CGContext, _ l: Layout) {
+        let u = l.u
+        // VU meters: the shroud hiding the bulb, and the gloss of the glass.
+        for i in 0..<3 {
+            let face = gaugeFace(l, i).insetBy(dx: 0.025 * u, dy: 0.025 * u)
+            c.saveGState()
+            c.addPath(CGPath(roundedRect: face, cornerWidth: 0.02 * u, cornerHeight: 0.02 * u, transform: nil))
+            c.clip()
+            let shroud = CGRect(x: face.minX, y: face.maxY - face.height * 0.1, width: face.width, height: face.height * 0.1)
+            linearGradient(c, shroud, [rgb(0.1, 0.09, 0.08), rgb(0.03, 0.03, 0.03)], vertical: true)
+            linearGradient(c, face, [rgb(1, 1, 1, 0.1), rgb(1, 1, 1, 0)], vertical: false, endFraction: 0.55)
+            c.restoreGState()
+        }
+        // Nixie tubes: the front of the anode cage, faintly lit by the glow behind it, and reflections on the glass.
+        for tube in nixieTubes(l) {
+            let g = nixieGlass(tube)
+            c.saveGState()
+            c.addPath(nixieGlassPath(g))
+            c.clip()
+            nixieMesh(c, g, rgb(0.9, 0.55, 0.3, 0.13))
+            linearGradient(c, CGRect(x: g.minX + g.width * 0.08, y: g.minY, width: g.width * 0.14, height: g.height),
+                           [rgb(1, 1, 1, 0.22), rgb(1, 1, 1, 0.02)], vertical: false)
+            linearGradient(c, CGRect(x: g.maxX - g.width * 0.16, y: g.minY, width: g.width * 0.08, height: g.height),
+                           [rgb(1, 1, 1, 0.0), rgb(1, 1, 1, 0.1)], vertical: false)
+            c.restoreGState()
+        }
+        // Drum counter: the gaps between drums, and their curvature (dark at the top and bottom of the window).
+        let win = counterWindow(l)
+        let n = counterDigits(win)
+        let dw = win.width / CGFloat(n)
+        c.saveGState()
+        c.clip(to: win)
+        c.setFillColor(rgb(0, 0, 0, 0.6))
+        for i in 0..<n {
+            c.fill(CGRect(x: win.minX + CGFloat(i + 1) * dw - 0.5, y: win.minY, width: 1, height: win.height))
+        }
+        linearGradient(c, win, [rgb(0, 0, 0, 0.75), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.75)], vertical: true)
+        c.restoreGState()
+        // Scope: scanlines and the glass.
+        let s = scopeScreen(l)
+        c.saveGState()
+        c.addPath(CGPath(roundedRect: s, cornerWidth: 0.05 * u, cornerHeight: 0.05 * u, transform: nil))
+        c.clip()
+        c.setFillColor(rgb(0, 0, 0, 0.18))
+        var sy = s.minY
+        while sy < s.maxY {
+            c.fill(CGRect(x: s.minX, y: sy, width: s.width, height: 1))
+            sy += 3
+        }
+        linearGradient(c, s, [rgb(1, 1, 1, 0.08), rgb(1, 1, 1, 0)], vertical: true, endFraction: 0.5)
+        c.restoreGState()
     }
 
     // MARK: Helpers

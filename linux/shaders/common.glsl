@@ -71,3 +71,21 @@ vec2 rot(vec2 p, float a) {
     float c = cos(a), s = sin(a);
     return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
 }
+
+/// Signed distance from a pixel to the canopy window's edge, in screen heights (negative inside), and the
+/// outward normal of the nearest edge. Matches the window shape drawn by the cockpit frame overlay.
+float windowEdge(vec2 px, vec2 size, out vec2 normal) {
+    float w = size.x, h = size.y;
+    float lo = w * 0.035, hi = w * 0.075, top = h * 0.07, ch = min(w, h) * 0.08;
+    vec2 P[8] = vec2[8](vec2(lo, h + 20.0), vec2(lo, h * 0.5), vec2(hi, top + ch), vec2(hi + ch, top),
+                        vec2(w - hi - ch, top), vec2(w - hi, top + ch), vec2(w - lo, h * 0.5), vec2(w - lo, h + 20.0));
+    float best = -1e9;
+    normal = vec2(0.0);
+    for (int i = 0; i < 7; i++) {
+        vec2 e = P[i + 1] - P[i];
+        vec2 n = normalize(vec2(e.y, -e.x));
+        float dist = dot(px - P[i], n);
+        if (dist > best) { best = dist; normal = n; }
+    }
+    return best / h;
+}

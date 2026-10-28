@@ -1,9 +1,15 @@
 name: Release
 
-# Push a tag like v1.0 to build both versions and publish them as a GitHub release.
+# Push a tag like v1.0, or run this workflow by hand with a version, to build both versions and publish them as
+# a GitHub release (run by hand, it creates the tag on the commit it runs on).
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag to create, like v1.1
+        required: true
 
 permissions:
   contents: write
@@ -19,6 +25,8 @@ jobs:
     needs: [linux, macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4 # for RELEASE_NOTES.md
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -26,15 +34,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: Nebula Drift ${{ github.ref_name }}
+          tag_name: ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Nebula Drift ${{ inputs.version || github.ref_name }}
           files: |
             dist/Nebula_Drift-x86_64.AppImage
             dist/Nebula_Drift-macOS.zip
-          body: |
-            An audio visualizer: fly through space while the music drives stars, nebulae, galaxies and black holes, with a retro spacecraft console reacting below the view.
-
-            **macOS** (14.2 or later, Apple silicon and Intel): download `Nebula_Drift-macOS.zip`, unzip it and move **Nebula Drift** to Applications. The app isn't notarized, so the first time right-click it and choose **Open** (or run `xattr -dr com.apple.quarantine "/Applications/Nebula Drift.app"`). Allow **System Audio Recording** when asked.
-
-            **Linux** (x86-64, glibc 2.35+: Ubuntu 22.04, Debian 12, Fedora 36 and newer): download `Nebula_Drift-x86_64.AppImage`, then `chmod +x Nebula_Drift-x86_64.AppImage` and run it. System audio needs PulseAudio or PipeWire.
-
-            Press **H** in the app for the keys.
+          body_path: RELEASE_NOTES.md
