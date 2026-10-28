@@ -23,6 +23,14 @@ jobs:
           lipo -info "build/Nebula Drift.app/Contents/MacOS/NebulaDrift"
           codesign --verify --verbose "build/Nebula Drift.app"
 
+      - name: Benchmark the console
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-bench
+          path: build/bench
+
       - name: Zip
         run: ditto -c -k --keepParent "build/Nebula Drift.app" build/Nebula_Drift-macOS.zip
 

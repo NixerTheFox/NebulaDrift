@@ -1597,7 +1597,50 @@ func runSnapshot(dir: String) throws {
     print("Snapshots written to \(dir)")
 }
 
+/// `--bench-console <dir>` times the instrument console's redraw (CPU only, no GPU needed) at Retina and normal
+/// resolution, calm and under tidal stress, and writes each last frame as a PNG.
+func runConsoleBench(dir: String) {
+    for (name, w, h, scale, alarm) in [("retina", 1600, 900, 2, Float(0)), ("retina_alarm", 1600, 900, 2, 0.8),
+                                       ("standard", 1280, 780, 1, 0)] {
+        let size = CGSize(width: w, height: h)
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let ctx = CGContext(data: nil, width: w * scale, height: h * scale, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)!
+        ctx.translateBy(x: 0, y: CGFloat(h * scale))
+        ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
+        let panel = InstrumentPanel()
+        var t: Float = 0
+        func frame() {
+            t += 1 / 60
+            let bands = (0..<AudioAnalyzer.bandCount).map { i in 0.5 + 0.3 * sinf(Float(i) * 0.4 + t * 5) }
+            panel.update(PanelInput(bands: bands, bass: 0.5 + 0.4 * sinf(t * 7), mid: 0.5 + 0.3 * sinf(t * 3),
+                                    treble: 0.4 + 0.3 * sinf(t * 11), level: 0.6, beat: fmodf(t, 0.5) < 0.1 ? 1 : 0,
+                                    speed: 0.4 + 0.3 * sinf(t), hue: t * 0.05, centroid: 0.5, roll: t * 0.02,
+                                    alarm: alarm), dt: 1 / 60)
+            ctx.clear(CGRect(origin: .zero, size: size))
+            panel.draw(in: ctx, viewSize: size)
+        }
+        for _ in 0..<20 { frame() }
+        let count = 240
+        let t0 = CACurrentMediaTime()
+        for _ in 0..<count { frame() }
+        let ms = (CACurrentMediaTime() - t0) / Double(count) * 1000
+        print(String(format: "console redraw %@ (%dx%d @%dx): %.2f ms", name, w, h, scale, ms))
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("console_\(name).png")
+        if let image = ctx.makeImage(),
+           let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, image, nil)
+            CGImageDestinationFinalize(dest)
+        }
+    }
+}
+
 let args = CommandLine.arguments
+if let i = args.firstIndex(of: "--bench-console"), i + 1 < args.count {
+    try? FileManager.default.createDirectory(atPath: args[i + 1], withIntermediateDirectories: true)
+    runConsoleBench(dir: args[i + 1])
+    exit(0)
+}
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
     do { try runSnapshot(dir: args[i + 1]) } catch { print("Snapshot failed: \(error)"); exit(1) }
     exit(0)
