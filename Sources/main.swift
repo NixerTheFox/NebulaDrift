@@ -556,7 +556,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let bgPipeline: MTLRenderPipelineState
     private let starPipeline: MTLRenderPipelineState
     private let postPipeline: MTLRenderPipelineState
+    private let glassPipeline: MTLRenderPipelineState
+    private let holePipeline: MTLRenderPipelineState
     private var sceneTexture: MTLTexture?
+    private var glassTexture: MTLTexture?   // canopy scratches and smudges, made once per frame size
+    private var glassReady = false
+    private var holeTextures: [MTLTexture] = [] // black hole rays at half resolution: direction, light
     private var ringAges: [Float] = []
     private var lastBeatAge: Float = .infinity
     private var spawnTimer: Float = .random(in: 15...35)
@@ -744,6 +749,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         post.colorAttachments[0].pixelFormat = pixelFormat
         postPipeline = try device.makeRenderPipelineState(descriptor: post)
 
+        let glass = MTLRenderPipelineDescriptor()
+        glass.vertexFunction = library.makeFunction(name: "bgVertex")
+        glass.fragmentFunction = library.makeFunction(name: "glassFragment")
+        glass.colorAttachments[0].pixelFormat = .rg16Float
+        glassPipeline = try device.makeRenderPipelineState(descriptor: glass)
+
+        let hole = MTLRenderPipelineDescriptor()
+        hole.vertexFunction = library.makeFunction(name: "bgVertex")
+        hole.fragmentFunction = library.makeFunction(name: "holeFragment")
+        hole.colorAttachments[0].pixelFormat = .rgba16Float
+        hole.colorAttachments[1].pixelFormat = .rgba16Float
+        holePipeline = try device.makeRenderPipelineState(descriptor: hole)
+
         let st = MTLRenderPipelineDescriptor()
         st.vertexFunction = library.makeFunction(name: "starVertex")
         st.fragmentFunction = library.makeFunction(name: "starFragment")
@@ -893,14 +911,67 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stars.count)
         enc.endEncoding()
 
+        // The canopy's scratches and smudges are fixed to the ship: worked out once per frame size.
+        if cockpitGlass && (!glassReady || glassTexture?.width != target.width || glassTexture?.height != target.height) {
+            let t = makeTexture(.rg16Float, width: target.width, height: target.height)
+            let glassPass = MTLRenderPassDescriptor()
+            glassPass.colorAttachments[0].texture = t
+            glassPass.colorAttachments[0].loadAction = .dontCare
+            glassPass.colorAttachments[0].storeAction = .store
+            if let g = cb.makeRenderCommandEncoder(descriptor: glassPass) {
+                g.setRenderPipelineState(glassPipeline)
+                g.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+                g.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                g.endEncoding()
+                glassTexture = t
+                glassReady = true
+            }
+        }
+
+        // Light rays past the black hole, at half resolution.
+        let hole = u.blackHole3.w > 0.001
+        if hole {
+            let hw = (target.width + 1) / 2, hh = (target.height + 1) / 2
+            if holeTextures.first?.width != hw || holeTextures.first?.height != hh {
+                holeTextures = [makeTexture(.rgba16Float, width: hw, height: hh),
+                                makeTexture(.rgba16Float, width: hw, height: hh)]
+            }
+            let holePass = MTLRenderPassDescriptor()
+            for (i, t) in holeTextures.enumerated() {
+                holePass.colorAttachments[i].texture = t
+                holePass.colorAttachments[i].loadAction = .dontCare
+                holePass.colorAttachments[i].storeAction = .store
+            }
+            if let h = cb.makeRenderCommandEncoder(descriptor: holePass) {
+                var fullSize = SIMD2<Float>(Float(target.width), Float(target.height))
+                h.setRenderPipelineState(holePipeline)
+                h.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+                h.setFragmentBytes(&fullSize, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                h.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                h.endEncoding()
+            }
+        }
+
         // Post pass: dither down to the 8-bit output.
         guard let post = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
         post.setRenderPipelineState(postPipeline)
         post.setFragmentTexture(scene, index: 0)
+        // Unused inputs still need a texture bound; the scene stands in.
+        post.setFragmentTexture(cockpitGlass ? glassTexture ?? scene : scene, index: 1)
+        post.setFragmentTexture(hole ? holeTextures[0] : scene, index: 2)
+        post.setFragmentTexture(hole ? holeTextures[1] : scene, index: 3)
         post.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         post.setFragmentBytes(&rings, length: MemoryLayout<Float>.stride * rings.count, index: 2)
         post.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         post.endEncoding()
+    }
+
+    private func makeTexture(_ format: MTLPixelFormat, width: Int, height: Int) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: max(width, 1),
+                                                            height: max(height, 1), mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        return device.makeTexture(descriptor: desc)!
     }
 
     private func sceneTexture(width: Int, height: Int) -> MTLTexture {

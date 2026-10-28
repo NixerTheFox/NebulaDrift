@@ -509,7 +509,7 @@ fragment float4 bgFragment(BgOut in [[stage_in]],
     return float4(col, 1.0);
 }
 
-// MARK: - Black hole (drawn in the post pass so it can bend the light of everything behind it)
+// MARK: - Black hole (traced at half resolution, then drawn in the post pass so it bends everything behind it)
 
 /// Approximate blackbody colour for a normalised temperature (0 = dull red ... 1 = white ... 1.4 = blue-white).
 static float3 blackbody(float t) {
@@ -702,12 +702,64 @@ static float windowEdge(float2 px, float2 size, thread float2& normal) {
     return best / h;
 }
 
+// MARK: - Glass and black hole passes
+
+/// Cockpit glass pass: the canopy's scratches, smudges and specks. They are fixed to the ship, so this runs only
+/// when the frame size changes; the post pass lights them with whatever lies behind.
+fragment float4 glassFragment(BgOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+    float2 size = u.resolution;
+    float2 px = in.position.xy;
+    float2 g = float2((px.x / size.x * 2.0 - 1.0) * u.aspect, 1.0 - px.y / size.y * 2.0);
+    float scr = glassScratches(g, 2.0 / size.y);
+    float smudge = smoothstep(0.42, 0.85, fbm(g * 1.6 + 3.0)) * 0.6 + fbm(g * 7.0) * 0.12;
+    float specks = step(0.996, hash21(floor(px * 0.5)));
+    return float4(scr + specks * 0.3, smudge, 0.0, 1.0);
+}
+
+struct HoleOut {
+    float4 dir [[color(0)]];   // direction the light finally came from (camera frame), transmittance
+    float4 light [[color(1)]]; // disc and jet light picked up along the way
+};
+
+/// Black hole pass: traces each pixel's light ray past the black hole. By far the most expensive part of a frame,
+/// so it runs at half resolution: the bending varies smoothly across the screen, and the post pass upsamples it.
+fragment HoleOut holeFragment(BgOut in [[stage_in]],
+                              constant Uniforms& u [[buffer(0)]],
+                              constant float2& fullSize [[buffer(1)]]) {
+    float2 size = fullSize;
+    float2 px = in.position.xy * 2.0; // the full-resolution point at the centre of this texel's 2 x 2 pixels
+
+    // The same ray the post pass would trace for this pixel: shaken by tidal stress, bent by the canopy's edge.
+    float2 uvT = px / size;
+    float stress = u.blackHole2.y;
+    if (stress > 0.0) {
+        float2 jolt = float2(fbm(float2(u.time * 9.0, 1.3)), fbm(float2(4.1, u.time * 9.0))) - 0.5;
+        uvT += jolt * 0.03 * stress * stress;
+    }
+    float2 q = float2((uvT.x * 2.0 - 1.0) * u.aspect, 1.0 - uvT.y * 2.0);
+    if (u.glass.x > 0.5) {
+        float2 nrm;
+        float edgeIn = -windowEdge(px, size, nrm);
+        float edgeK = pow(saturate(1.0 - edgeIn / 0.11), 2.2);
+        float2 shiftPx = -nrm * edgeK * 0.06 * size.y;
+        q += float2(shiftPx.x / size.x * 2.0 * u.aspect, -shiftPx.y / size.y * 2.0);
+    }
+    HoleTrace ht = traceHole(float3(q, 1.0), u);
+    HoleOut o;
+    o.dir = float4(ht.dir, ht.trans);
+    o.light = float4(ht.light, 1.0);
+    return o;
+}
+
 // MARK: - Post pass: lensing, chromatic aberration and dithering
 
 constant float bayer4[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
 
 fragment float4 postFragment(BgOut in [[stage_in]],
                              texture2d<float> scene [[texture(0)]],
+                             texture2d<float> glassTex [[texture(1)]],    // scratches and specks, smudge
+                             texture2d<float> holeDirTex [[texture(2)]],  // the black hole pass, half resolution
+                             texture2d<float> holeLightTex [[texture(3)]],
                              constant Uniforms& u [[buffer(0)]],
                              constant float* rings [[buffer(2)]]) {
     constexpr sampler smp(filter::linear, address::clamp_to_edge);
@@ -756,12 +808,17 @@ fragment float4 postFragment(BgOut in [[stage_in]],
         edgeQ = float2(shiftPx.x / size.x * 2.0 * u.aspect, -shiftPx.y / size.y * 2.0);
     }
 
-    // Trace this pixel's ray past the black hole (once), to find where its light really came from.
+    // Where this pixel's ray past the black hole really came from (traced at half resolution in holeFragment).
     float2 qView = q + edgeQ;
     float3 holeLight = float3(0.0);
     float holeTrans = 1.0;
     if (hole) {
-        HoleTrace ht = traceHole(float3(qView, 1.0), u);
+        float2 sh = (mode == 2 ? cell * block + block * 0.5 : px) / size;
+        float4 hd = holeDirTex.sample(smp, sh);
+        HoleTrace ht;
+        ht.dir = normalize(hd.xyz);
+        ht.trans = hd.w;
+        ht.light = holeLightTex.sample(smp, sh).rgb;
         float2 qs = ht.dir.xy / max(ht.dir.z, 0.05);
         holeTrans = mix(1.0, ht.trans * smoothstep(-0.1, 0.25, ht.dir.z), holeAlpha);
         holeLight = ht.light * holeAlpha;
@@ -826,10 +883,9 @@ fragment float4 postFragment(BgOut in [[stage_in]],
         around /= 6.0;
         float3 lum = float3(0.3, 0.5, 0.2);
         float light = dot(around, lum) * 1.8 + dot(c, lum) * 0.7 + 0.02;
-        float scr = glassScratches(g, 2.0 / size.y);
-        float smudge = smoothstep(0.42, 0.85, fbm(g * 1.6 + 3.0)) * 0.6 + fbm(g * 7.0) * 0.12;
-        float specks = step(0.996, hash21(floor(px * 0.5)));
-        c += float3(0.85, 0.9, 1.0) * (scr + specks * 0.3) * light * 1.15;
+        float2 scratched = glassTex.read(uint2(px)).rg; // scratches and specks, smudge (see glassFragment)
+        float smudge = scratched.y;
+        c += float3(0.85, 0.9, 1.0) * scratched.x * light * 1.15;
         c += around * smudge * 0.4;                       // haze scatters nearby light
         c *= float3(0.94, 0.97, 1.0);                    // faint tint of the canopy
         c += float3(0.3, 0.18, 0.08) * smoothstep(-0.2, -1.0, g.y) * 0.05; // console glow reflected low down

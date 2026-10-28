@@ -14,6 +14,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # for the before/after console comparison
 
       - name: Build universal app
         run: ./build.sh
@@ -27,15 +29,23 @@ jobs:
       - name: Benchmark the console
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench'
 
-      - name: Profile the console (Retina)
+      - name: Compare the console with the version before the optimizations (same machine)
         run: |
-          "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/profile --profile-seconds 12 &
-          sleep 2
-          sample $! 6 -file build/sample.txt >/dev/null 2>&1 || true
-          wait
-          # The busiest functions (own time), then the call tree's heaviest lines.
-          sed -n '/Sort by top of stack/,$p' build/sample.txt | head -60
-          awk '/Call graph:/,/Total number in stack/' build/sample.txt | grep -E "InstrumentPanel|CGContext|CGSImage|argb32|ripc|RIP|_img|CGImage|draw" | head -80
+          mkdir -p build/old
+          git show 37b02b9:Sources/Instruments.swift > build/old/Instruments.swift
+          swiftc -O -swift-version 5 -target arm64-apple-macos14.2 -o build/old/NebulaDrift \
+            $(ls Sources/*.swift | grep -v Instruments.swift) build/old/Instruments.swift 2>/dev/null
+          for round in 1 2 3; do
+            echo "-- before:"; build/old/NebulaDrift --bench-console build/old/bench
+            echo "-- after:"; "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench
+          done
+
+      - name: Compile the Metal shaders
+        run: xcrun -sdk macosx metal -c Sources/Shaders.metal -o build/Shaders.air
+
+      - name: Render the test frames (needs a GPU)
+        continue-on-error: true
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
 
       - uses: actions/upload-artifact@v4
         with:
