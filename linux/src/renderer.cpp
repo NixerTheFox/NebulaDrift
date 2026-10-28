@@ -275,8 +275,12 @@ Renderer::Renderer(const std::string& shaderDir, std::function<AudioFeatures(flo
     starProgram = link(shaderDir, "star.vert", "star.frag");
     nebLoc = glGetUniformLocation(sceneProgram, "nebulae");
     galLoc = glGetUniformLocation(sceneProgram, "galaxies");
+    glassProgram = link(shaderDir, "fullscreen.vert", "glass.frag");
+    holeProgram = link(shaderDir, "fullscreen.vert", "hole.frag");
     ringLoc = glGetUniformLocation(postProgram, "rings");
-    sceneLoc = glGetUniformLocation(postProgram, "scene");
+    const char* inputNames[4] = {"scene", "glassTex", "holeDir", "holeLight"};
+    for (int i = 0; i < 4; i++) postInputLocs[i] = glGetUniformLocation(postProgram, inputNames[i]);
+    fullSizeLoc = glGetUniformLocation(holeProgram, "fullSize");
 
     glGenVertexArrays(1, &emptyVAO);
     glGenVertexArrays(1, &starVAO);
@@ -305,6 +309,12 @@ Renderer::Renderer(const std::string& shaderDir, std::function<AudioFeatures(flo
 
 Renderer::~Renderer() {
     glDeleteProgram(sceneProgram);
+    glDeleteProgram(glassProgram);
+    glDeleteProgram(holeProgram);
+    if (glassFBO) glDeleteFramebuffers(1, &glassFBO);
+    if (holeFBO) glDeleteFramebuffers(1, &holeFBO);
+    const GLuint extra[3] = {glassTex, holeDirTex, holeLightTex};
+    glDeleteTextures(3, extra);
     glDeleteProgram(postProgram);
     glDeleteProgram(starProgram);
     glDeleteVertexArrays(1, &emptyVAO);
@@ -427,23 +437,31 @@ void Renderer::step(float dt, int width, int height) {
 
 void Renderer::ensureTargets(int width, int height) {
     if (width == targetW && height == targetH && sceneFBO) return;
-    auto makeTarget = [&](GLuint& fbo, GLuint& tex, GLint internal, GLenum type) {
+    auto makeTarget = [](GLuint& fbo, GLuint& tex, GLenum attachment, int w, int h, GLint internal, GLenum type) {
         if (!fbo) glGenFramebuffers(1, &fbo);
         if (!tex) glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, internal, width, height, 0, GL_RGBA, type, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, GL_RGBA, type, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachment, GL_TEXTURE_2D, tex, 0);
     };
-    makeTarget(sceneFBO, sceneTex, GL_RGBA16F, GL_HALF_FLOAT);
-    makeTarget(outFBO, outTex, GL_RGBA8, GL_UNSIGNED_BYTE);
+    makeTarget(sceneFBO, sceneTex, GL_COLOR_ATTACHMENT0, width, height, GL_RGBA16F, GL_HALF_FLOAT);
+    makeTarget(outFBO, outTex, GL_COLOR_ATTACHMENT0, width, height, GL_RGBA8, GL_UNSIGNED_BYTE);
+    makeTarget(glassFBO, glassTex, GL_COLOR_ATTACHMENT0, width, height, GL_RG16F, GL_HALF_FLOAT);
+    // The black hole is traced at half resolution, into two targets at once.
+    int hw = (width + 1) / 2, hh = (height + 1) / 2;
+    makeTarget(holeFBO, holeDirTex, GL_COLOR_ATTACHMENT0, hw, hh, GL_RGBA16F, GL_HALF_FLOAT);
+    makeTarget(holeFBO, holeLightTex, GL_COLOR_ATTACHMENT1, hw, hh, GL_RGBA16F, GL_HALF_FLOAT);
+    const GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, both);
     glBindTexture(GL_TEXTURE_2D, 0);
     targetW = width;
     targetH = height;
+    glassReady = false;
 }
 
 void Renderer::collectTimings() {
@@ -498,12 +516,36 @@ GLuint Renderer::render(int width, int height) {
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, GLsizei(stars.size()));
     glDisable(GL_BLEND);
 
+    // The canopy's scratches and smudges are fixed to the ship: worked out once per frame size.
+    bool hole = u.blackHole3.w > 0.001f;
+    if (cockpitGlass && !glassReady) {
+        glBindFramebuffer(GL_FRAMEBUFFER, glassFBO);
+        glUseProgram(glassProgram);
+        glBindVertexArray(emptyVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glassReady = true;
+    }
+    // Light rays past the black hole, at half resolution.
+    if (hole) {
+        glBindFramebuffer(GL_FRAMEBUFFER, holeFBO);
+        glViewport(0, 0, (width + 1) / 2, (height + 1) / 2);
+        glUseProgram(holeProgram);
+        glUniform2f(fullSizeLoc, float(width), float(height));
+        glBindVertexArray(emptyVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glViewport(0, 0, width, height);
+    }
+
     // Post pass: lensing, colour split, glass and dithering down to 8 bits.
     glBindFramebuffer(GL_FRAMEBUFFER, outFBO);
     glUseProgram(postProgram);
+    const GLuint inputs[4] = {sceneTex, glassTex, holeDirTex, holeLightTex};
+    for (int i = 0; i < 4; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, inputs[i]);
+        glUniform1i(postInputLocs[i], i);
+    }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, sceneTex);
-    glUniform1i(sceneLoc, 0);
     glUniform1fv(ringLoc, maxRings, rings.data());
     glBindVertexArray(emptyVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);

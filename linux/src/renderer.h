@@ -161,11 +161,15 @@ private:
     std::vector<Star> stars;
     float hueBase;
 
-    GLuint sceneProgram = 0, postProgram = 0, starProgram = 0;
+    GLuint sceneProgram = 0, postProgram = 0, starProgram = 0, glassProgram = 0, holeProgram = 0;
     GLuint emptyVAO = 0, starVAO = 0, starVBO = 0, ubo = 0;
     GLuint sceneFBO = 0, sceneTex = 0, outFBO = 0, outTex = 0;
     int targetW = 0, targetH = 0;
-    GLint nebLoc = -1, galLoc = -1, ringLoc = -1, sceneLoc = -1;
+    GLuint glassFBO = 0, glassTex = 0;                       // canopy scratches and smudges (glass.frag)
+    GLuint holeFBO = 0, holeDirTex = 0, holeLightTex = 0;    // black hole rays at half resolution (hole.frag)
+    bool glassReady = false;
+    GLint nebLoc = -1, galLoc = -1, ringLoc = -1, fullSizeLoc = -1;
+    GLint postInputLocs[4] = {-1, -1, -1, -1};
 
     static constexpr int queryCount = 4;
     GLuint queries[queryCount] = {};
