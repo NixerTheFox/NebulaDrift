@@ -3,7 +3,9 @@ THE IDEA IS 100% Mine tho.
 
 # Nebula Drift
 
-An audio visualizer for macOS and Linux. You fly through space while the music drives everything you see: stars stream past, nebulae, gas clouds and galaxies grow from distant specks into vast clouds you fly through, beats send shockwaves across the view, and on very rare occasions you pass a black hole that bends light around it. A retro spacecraft console with Nixie tubes, VU meters and sliders reacts to the sound below the view.
+An audio visualizer for macOS and Linux. You fly through space while the music drives everything you see: stars stream past, nebulae, gas clouds and galaxies grow from distant specks into vast clouds you fly through, beats send shockwaves across the view, and on very rare occasions you pass a black hole that bends light around it. A retro spacecraft console with Nixie tubes, VU meters and sliders reacts to the sound below the view; press V for a mid-80s digital dashboard instead, a green vacuum-fluorescent cluster behind smoked glass. Both show the song that's playing on a dot-matrix display.
+
+The song comes from the file you opened (its tags, or its name), or, while listening to system audio, from the Music app and Spotify on the Mac (other players too on macOS 15.3 and earlier) and from any MPRIS media player on Linux (Spotify, browsers, Rhythmbox, VLC and most others).
 
 The macOS app is written in Swift with Metal shaders (no Xcode project, no dependencies). The Linux version in [`linux/`](linux) is a port to C++ with OpenGL, SDL2 and Cairo, packaged as an AppImage.
 
@@ -62,7 +64,8 @@ On Fedora the packages are `cmake gcc-c++ SDL2-devel cairo-devel freetype-devel 
 | M | Listen to the microphone |
 | O | Open an audio file (or drag one onto the window) |
 | F | Full screen (Esc to leave) |
-| I | Show or hide the instrument console |
+| I | Show or hide the instruments |
+| V | Switch between the Nixie console and the digital dashboard |
 | G | Cockpit canopy: scratched thick glass and a hull frame |
 | P | Performance stats (FPS, CPU, GPU) |
 | T | Fly straight into the next nebula, gas cloud or galaxy |
