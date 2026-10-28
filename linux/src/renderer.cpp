@@ -352,8 +352,11 @@ void Renderer::step(float dt, int width, int height) {
     u.aspect = aspect;
     u.time += dt;
 
-    float target = 0.10f + f.level * 0.5f + f.bass * 0.35f + f.beat * 0.7f;
+    float target = 0.10f + f.level * 0.5f + f.bass * 0.35f;
     u.speed += (target - u.speed) * (1 - expf(-dt * 2.5f));
+    // Each beat kicks the ship forward, harder on heavy bass, and the speed slides back as the beat fades:
+    // a heavy beat takes it past 10c.
+    if (f.beatAge < lastBeatAge) u.speed = std::min(u.speed + 0.25f + 0.4f * f.bass, 1.8f);
     u.travel += u.speed * dt;
     u.bass = f.bass;
     u.mid = f.mid;

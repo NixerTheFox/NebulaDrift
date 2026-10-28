@@ -809,8 +809,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         u.aspect = aspect
         u.time += dt
 
-        let target = 0.10 + f.level * 0.5 + f.bass * 0.35 + f.beat * 0.7
+        let target = 0.10 + f.level * 0.5 + f.bass * 0.35
         u.speed += (target - u.speed) * (1 - expf(-dt * 2.5))
+        // Each beat kicks the ship forward, harder on heavy bass, and the speed slides back as the beat fades:
+        // a heavy beat takes it past 10c.
+        if f.beatAge < lastBeatAge { u.speed = min(u.speed + 0.25 + 0.4 * f.bass, 1.8) }
         u.travel += u.speed * dt
         u.bass = f.bass
         u.mid = f.mid

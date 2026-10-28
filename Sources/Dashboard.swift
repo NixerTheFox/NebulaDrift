@@ -445,9 +445,9 @@ final class Dashboard {
             glowText(c, s, CGPoint(x: x, y: y), size: size * u, color: k ?? legend, blur: blur, align: align)
         }
         label("FLUX", l.flux.midX + 0.04 * u, l.flux.minY - 0.055 * u, 0.055)
-        label("F", l.flux.maxX + 0.05 * u, l.flux.minY + 0.015 * u, 0.045, .left)
+        label("MAX", l.flux.maxX + 0.05 * u, l.flux.minY + 0.015 * u, 0.045, .left)
         label("1/2", l.flux.maxX + 0.05 * u, l.flux.midY, 0.04, .left)
-        label("E", l.flux.maxX + 0.05 * u, l.flux.maxY - 0.015 * u, 0.045, .left)
+        label("MIN", l.flux.maxX + 0.05 * u, l.flux.maxY - 0.015 * u, 0.045, .left)
         label("REACTOR OUTPUT", l.flux.midX + 0.04 * u, f.minY + 0.665 * u, 0.035)
         label("SPEED", l.speedBox.minX - 0.05 * u, l.speedBox.maxY - 0.04 * u, 0.06, .right)
         c.saveGState()
@@ -467,14 +467,14 @@ final class Dashboard {
         for (j, s) in ["1", "2", "5", "10", "20", "50"].enumerated() {
             label(s, l.scaleDots[j].x, l.scaleDots[j].y + 0.045 * u, 0.035)
         }
-        label("x100 r/min", l.rpmDigits[1].maxX + 0.025 * u, l.rpmDigits[1].maxY - 0.02 * u, 0.034, .left)
-        label("TACH", l.tach.minX - 0.04 * u, l.tach.maxY - 0.03 * u, 0.06, .right)
+        label("x100 kN", l.rpmDigits[1].maxX + 0.025 * u, l.rpmDigits[1].maxY - 0.02 * u, 0.034, .left)
+        label("THRUST", l.tach.minX - 0.04 * u, l.tach.maxY - 0.03 * u, 0.06, .right)
         let pitch = l.tach.width / CGFloat(Self.tachColumns)
         func tachX(_ v: CGFloat) -> CGFloat { l.tach.minX + (v - 0.5) / 7 * (l.tach.width - pitch) + pitch / 2 }
         for (k, s) in ["0.5", "1", "2", "3", "4", "5", "6", "7"].enumerated() {
             label(s, tachX(k == 0 ? 0.5 : CGFloat(k)), l.tach.maxY + 0.045 * u, 0.04)
         }
-        label("x1000 r/min", l.tach.maxX + 0.03 * u, l.tach.maxY + 0.045 * u, 0.032, .left)
+        label("x1000 kN", l.tach.maxX + 0.03 * u, l.tach.maxY + 0.045 * u, 0.032, .left)
         // Redline over the top of the rev range.
         let last = tachColumn(l, Self.tachColumns - 1).rect
         c.saveGState()
