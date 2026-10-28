@@ -1,12 +1,12 @@
 // Black hole pass: traces each pixel's light ray past the black hole (port of traceHole in
-// Sources/Shaders.metal). By far the most expensive part of a frame, so it runs at half resolution: the bending
-// varies smoothly across the screen, and the post pass upsamples the result.
+// Sources/Shaders.metal). By far the most expensive part of a frame, so it traces one ray per 2 x 2 pixels
+// (3 x 3 on Retina-sized frames): the bending varies smoothly across the screen, and the post pass upsamples it.
 
 in vec2 ndc;
 layout(location = 0) out vec4 holeDir;   // direction the light finally came from (camera frame), transmittance
 layout(location = 1) out vec4 holeLight; // disc and jet light picked up along the way
 
-uniform vec2 fullSize; // the full-resolution frame, in pixels
+uniform vec3 frame; // full width and height in pixels, pixels per ray
 
 /// Approximate blackbody colour for a normalised temperature (0 = dull red ... 1 = white ... 1.4 = blue-white).
 vec3 blackbody(float t) {
@@ -140,10 +140,10 @@ HoleTrace traceHole(vec3 rd) {
 }
 
 void main() {
-    vec2 size = fullSize;
-    // The full-resolution point at the centre of this texel's 2 x 2 pixels, y-down as in the post pass.
-    vec2 halfSize = ceil(size * 0.5);
-    vec2 px = vec2(gl_FragCoord.x, halfSize.y - gl_FragCoord.y) * 2.0;
+    vec2 size = frame.xy;
+    // The full-resolution point at the centre of this texel's pixels, y-down as in the post pass.
+    float rayRows = ceil(size.y / frame.z);
+    vec2 px = vec2(gl_FragCoord.x, rayRows - gl_FragCoord.y) * frame.z;
 
     // The same ray the post pass would trace for this pixel: shaken by tidal stress, bent by the canopy's edge.
     vec2 uvT = px / size;

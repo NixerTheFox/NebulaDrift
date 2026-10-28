@@ -148,6 +148,9 @@ private:
                           std::optional<float> kind = {});
     void respawn(Star& s, float aspect, std::optional<float> z = {});
     void ensureTargets(int width, int height);
+    /// Pixels per black hole ray along each axis: wider frames get coarser rays, so the cost stays about the
+    /// same as at standard resolution.
+    static int holeStep(int width) { return width > 2200 ? 3 : 2; }
     void collectTimings();
 
     std::function<AudioFeatures(float)> features;
@@ -168,7 +171,7 @@ private:
     GLuint glassFBO = 0, glassTex = 0;                       // canopy scratches and smudges (glass.frag)
     GLuint holeFBO = 0, holeDirTex = 0, holeLightTex = 0;    // black hole rays at half resolution (hole.frag)
     bool glassReady = false;
-    GLint nebLoc = -1, galLoc = -1, ringLoc = -1, fullSizeLoc = -1;
+    GLint nebLoc = -1, galLoc = -1, ringLoc = -1, frameLoc = -1;
     GLint postInputLocs[4] = {-1, -1, -1, -1};
 
     static constexpr int queryCount = 4;

@@ -509,7 +509,7 @@ fragment float4 bgFragment(BgOut in [[stage_in]],
     return float4(col, 1.0);
 }
 
-// MARK: - Black hole (traced at half resolution, then drawn in the post pass so it bends everything behind it)
+// MARK: - Black hole (traced at reduced resolution, then drawn in the post pass so it bends everything behind it)
 
 /// Approximate blackbody colour for a normalised temperature (0 = dull red ... 1 = white ... 1.4 = blue-white).
 static float3 blackbody(float t) {
@@ -722,12 +722,13 @@ struct HoleOut {
 };
 
 /// Black hole pass: traces each pixel's light ray past the black hole. By far the most expensive part of a frame,
-/// so it runs at half resolution: the bending varies smoothly across the screen, and the post pass upsamples it.
+/// so it traces one ray per 2 x 2 pixels (3 x 3 on Retina-sized frames): the bending varies smoothly across the
+/// screen, and the post pass upsamples it.
 fragment HoleOut holeFragment(BgOut in [[stage_in]],
                               constant Uniforms& u [[buffer(0)]],
-                              constant float2& fullSize [[buffer(1)]]) {
-    float2 size = fullSize;
-    float2 px = in.position.xy * 2.0; // the full-resolution point at the centre of this texel's 2 x 2 pixels
+                              constant float4& frame [[buffer(1)]]) { // full width, height, pixels per ray
+    float2 size = frame.xy;
+    float2 px = in.position.xy * frame.z; // the full-resolution point at the centre of this texel's pixels
 
     // The same ray the post pass would trace for this pixel: shaken by tidal stress, bent by the canopy's edge.
     float2 uvT = px / size;
@@ -758,7 +759,7 @@ constant float bayer4[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13,
 fragment float4 postFragment(BgOut in [[stage_in]],
                              texture2d<float> scene [[texture(0)]],
                              texture2d<float> glassTex [[texture(1)]],    // scratches and specks, smudge
-                             texture2d<float> holeDirTex [[texture(2)]],  // the black hole pass, half resolution
+                             texture2d<float> holeDirTex [[texture(2)]],  // the black hole pass, reduced resolution
                              texture2d<float> holeLightTex [[texture(3)]],
                              constant Uniforms& u [[buffer(0)]],
                              constant float* rings [[buffer(2)]]) {
@@ -808,7 +809,7 @@ fragment float4 postFragment(BgOut in [[stage_in]],
         edgeQ = float2(shiftPx.x / size.x * 2.0 * u.aspect, -shiftPx.y / size.y * 2.0);
     }
 
-    // Where this pixel's ray past the black hole really came from (traced at half resolution in holeFragment).
+    // Where this pixel's ray past the black hole really came from (traced at reduced resolution in holeFragment).
     float2 qView = q + edgeQ;
     float3 holeLight = float3(0.0);
     float holeTrans = 1.0;

@@ -928,10 +928,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
 
-        // Light rays past the black hole, at half resolution.
+        // Light rays past the black hole, one per 2 x 2 pixels (3 x 3 on Retina-sized frames).
         let hole = u.blackHole3.w > 0.001
         if hole {
-            let hw = (target.width + 1) / 2, hh = (target.height + 1) / 2
+            let step = Self.holeStep(width: target.width)
+            let hw = (target.width + step - 1) / step, hh = (target.height + step - 1) / step
             if holeTextures.first?.width != hw || holeTextures.first?.height != hh {
                 holeTextures = [makeTexture(.rgba16Float, width: hw, height: hh),
                                 makeTexture(.rgba16Float, width: hw, height: hh)]
@@ -943,10 +944,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 holePass.colorAttachments[i].storeAction = .store
             }
             if let h = cb.makeRenderCommandEncoder(descriptor: holePass) {
-                var fullSize = SIMD2<Float>(Float(target.width), Float(target.height))
+                var frame = SIMD4<Float>(Float(target.width), Float(target.height), Float(step), 0)
                 h.setRenderPipelineState(holePipeline)
                 h.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-                h.setFragmentBytes(&fullSize, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                h.setFragmentBytes(&frame, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
                 h.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 h.endEncoding()
             }
@@ -965,6 +966,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         post.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         post.endEncoding()
     }
+
+    /// Pixels per black hole ray along each axis: wider frames get coarser rays, so the cost stays about the
+    /// same as at standard resolution.
+    static func holeStep(width: Int) -> Int { width > 2200 ? 3 : 2 }
 
     private func makeTexture(_ format: MTLPixelFormat, width: Int, height: Int) -> MTLTexture {
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: max(width, 1),

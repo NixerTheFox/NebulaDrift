@@ -280,7 +280,7 @@ Renderer::Renderer(const std::string& shaderDir, std::function<AudioFeatures(flo
     ringLoc = glGetUniformLocation(postProgram, "rings");
     const char* inputNames[4] = {"scene", "glassTex", "holeDir", "holeLight"};
     for (int i = 0; i < 4; i++) postInputLocs[i] = glGetUniformLocation(postProgram, inputNames[i]);
-    fullSizeLoc = glGetUniformLocation(holeProgram, "fullSize");
+    frameLoc = glGetUniformLocation(holeProgram, "frame");
 
     glGenVertexArrays(1, &emptyVAO);
     glGenVertexArrays(1, &starVAO);
@@ -452,8 +452,8 @@ void Renderer::ensureTargets(int width, int height) {
     makeTarget(sceneFBO, sceneTex, GL_COLOR_ATTACHMENT0, width, height, GL_RGBA16F, GL_HALF_FLOAT);
     makeTarget(outFBO, outTex, GL_COLOR_ATTACHMENT0, width, height, GL_RGBA8, GL_UNSIGNED_BYTE);
     makeTarget(glassFBO, glassTex, GL_COLOR_ATTACHMENT0, width, height, GL_RG16F, GL_HALF_FLOAT);
-    // The black hole is traced at half resolution, into two targets at once.
-    int hw = (width + 1) / 2, hh = (height + 1) / 2;
+    // The black hole is traced at reduced resolution, into two targets at once.
+    int step = holeStep(width), hw = (width + step - 1) / step, hh = (height + step - 1) / step;
     makeTarget(holeFBO, holeDirTex, GL_COLOR_ATTACHMENT0, hw, hh, GL_RGBA16F, GL_HALF_FLOAT);
     makeTarget(holeFBO, holeLightTex, GL_COLOR_ATTACHMENT1, hw, hh, GL_RGBA16F, GL_HALF_FLOAT);
     const GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
@@ -525,12 +525,13 @@ GLuint Renderer::render(int width, int height) {
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glassReady = true;
     }
-    // Light rays past the black hole, at half resolution.
+    // Light rays past the black hole, one per 2 x 2 pixels (3 x 3 on Retina-sized frames).
     if (hole) {
+        int step = holeStep(width);
         glBindFramebuffer(GL_FRAMEBUFFER, holeFBO);
-        glViewport(0, 0, (width + 1) / 2, (height + 1) / 2);
+        glViewport(0, 0, (width + step - 1) / step, (height + step - 1) / step);
         glUseProgram(holeProgram);
-        glUniform2f(fullSizeLoc, float(width), float(height));
+        glUniform3f(frameLoc, float(width), float(height), float(step));
         glBindVertexArray(emptyVAO);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glViewport(0, 0, width, height);
