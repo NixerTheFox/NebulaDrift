@@ -1,5 +1,7 @@
 #include "instruments.h"
 
+#include "dotmatrix.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -33,6 +35,7 @@ InstrumentPanel::~InstrumentPanel() {
     for (Patch& p : hazedTubes) p.release();
     if (gripImage) cairo_surface_destroy(gripImage);
     if (capImage) cairo_surface_destroy(capImage);
+    if (songImage) cairo_surface_destroy(songImage);
 }
 
 /// Renders `draw` (from the origin, `w` x `h` points) once into `image` (replacing it), at the console's pixel scale.
@@ -116,7 +119,7 @@ void InstrumentPanel::update(const PanelInput& i, float rawDt) {
     gauges[0].step(mixed(i.bass, 0), dt, 140 * hard);
     gauges[1].step(mixed(i.mid, 1), dt, 140 * hard);
     gauges[2].step(mixed(i.treble, 2), dt, 140 * hard);
-    velocity.step(mixed(std::min(i.speed / 1.2f, 1.0f), 3), dt, 40 * hard * hard, 9);
+    velocity.step(mixed(i.speed / maxSpeed, 3), dt, 40 * hard * hard, 9);
     const int n = int(i.bands.size());
     for (int k = 0; k < faderCount; k++) {
         int lo = k * n / faderCount, hi = std::max((k + 1) * n / faderCount, lo + 1);
@@ -150,9 +153,9 @@ void InstrumentPanel::update(const PanelInput& i, float rawDt) {
     float bulbTarget = (chaos > 0.02f && frand(0, 1) < chaos * 0.25f) ? 0.25f : 1;
     bulb += (bulbTarget - bulb) * (1 - expf(-dt * 3));
 
-    // Nixie readout, 00.00 c ... 10.00 c: when a digit changes, the new cathode ignites and the old one
+    // Nixie readout, 00.70 c ... 99.99 c: when a digit changes, the new cathode ignites and the old one
     // leaves an afterglow.
-    float value = std::min(std::max(velocity.pos, 0.0f), 1.0f) * 10;
+    float value = lightSpeedsFor(velocity.pos * maxSpeed);
     char text[16];
     std::snprintf(text, sizeof(text), "%04d", int(std::floor(value * 100)));
     std::array<int, nixieCount> digits{};
@@ -171,6 +174,8 @@ void InstrumentPanel::update(const PanelInput& i, float rawDt) {
         }
     }
     distance += double(i.speed * dt) * 2.5;
+    if (songHold > 0) songHold -= dt;
+    else songScroll += dt * 14; // dot columns a second
     bands = i.bands;
     bass = i.bass;
     centroid = i.centroid;
@@ -182,18 +187,26 @@ double InstrumentPanel::panelHeight(double width, double height) {
     return std::max(std::min({height * 0.26, width / 10.9, 200.0}), 40.0);
 }
 
-double InstrumentPanel::stripHeight(double width, double height) { return panelHeight(width, height) * 1.15; }
+double InstrumentPanel::stripHeight(double width, double height) { return panelHeight(width, height) * 1.2; }
+
+void InstrumentPanel::setSong(const std::string& text) {
+    if (text == song) return;
+    song = text;
+    songScroll = 0;
+    songHold = 1.5;
+}
 
 InstrumentPanel::Layout InstrumentPanel::layout(double width, double height) const {
     double u = panelHeight(width, height);
     double shadow = u * 0.15;
-    Layout l{u, shadow, u + shadow, shadow, {}, {}, {}, {}, {}, {}, {}};
+    double top = u * 0.2; // room above the panel for the song display's plate
+    Layout l{u, shadow, u + top, top, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 0};
     const double widths[7] = {0.8 * u, 2.34 * u, 1.5 * u, 1.68 * u, 1.4 * u, 1.46 * u, 0.6 * u};
     double gap = 0.12 * u;
     double total = gap * 6;
     for (double w : widths) total += w;
     double x = (width - total) / 2;
-    double y = shadow + 0.13 * u;
+    double y = top + 0.13 * u;
     double h = 0.74 * u;
     Rect rects[7];
     for (int i = 0; i < 7; i++) {
@@ -207,6 +220,13 @@ InstrumentPanel::Layout InstrumentPanel::layout(double width, double height) con
     l.scope = rects[4];
     l.knobs = rects[5];
     l.lamps = rects[6];
+    l.tab = {width / 2 - 2.0 * u, top - 0.17 * u, 4.0 * u, 0.23 * u};
+    l.screen = {l.tab.x + 0.52 * u, l.tab.y + 0.035 * u, l.tab.w - 0.6 * u, 0.11 * u};
+    double p = l.screen.h * 0.78 / dotmatrix::rows;
+    l.dotPitch = p;
+    double dotsX = l.screen.x + 0.04 * u;
+    l.dots = {dotsX, l.screen.y + (l.screen.h - 7 * p) / 2, std::floor((l.screen.maxX() - 0.04 * u - dotsX) / p) * p,
+              7 * p};
     return l;
 }
 
@@ -280,6 +300,7 @@ void InstrumentPanel::drawStrip(cairo_t* c, double width, double height) {
             fillRect(c, {1, cap.midY() - 0.5, cap.w - 2, 1.2}, rgb(1, 1, 1, 0.9));
         });
         shadows.clear();
+        songRendered.clear();
         cacheW = width;
         cacheH = l.stripHeight;
         cacheScale = scale;
@@ -357,7 +378,7 @@ void InstrumentPanel::drawStatic(cairo_t* c, const Layout& l, double width) {
     Rect panel{0, l.panelTop, width, u};
 
     // Shade cast onto the space view above the console.
-    linearGradient(c, {0, 0, width, l.shadow}, {rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.55)}, true);
+    linearGradient(c, {0, l.panelTop - l.shadow, width, l.shadow}, {rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.55)}, true);
 
     // Painted gunmetal with brushed grain.
     linearGradient(c, panel, {rgb(0.2, 0.215, 0.2), rgb(0.105, 0.115, 0.105)}, true);
@@ -408,6 +429,67 @@ void InstrumentPanel::drawStatic(cairo_t* c, const Layout& l, double width) {
 
     // A dim cabin: darken all the metalwork so only what's lit really glows.
     fillRect(c, panel, rgb(0, 0, 0, 0.42));
+    staticSongTab(c, l);
+}
+
+/// Colour of the song display's neon plasma glow.
+static const RGBA plasma{1.0, 0.46, 0.14, 1};
+
+/// A raised plate on top of the console holding a neon plasma dot-matrix panel (like the Burroughs Self-Scan
+/// displays of the 70s): the song that's playing glows on it in orange.
+void InstrumentPanel::staticSongTab(cairo_t* c, const Layout& l) {
+    double u = l.u;
+    Rect t = l.tab;
+    plate(c, t, u, nullptr);
+    cairo_save(c);
+    addRoundedRect(c, t, 0.035 * u);
+    cairo_clip(c);
+    fillRect(c, t, rgb(0, 0, 0, 0.42));
+    cairo_restore(c);
+    drawText(c, "AUDIO", {t.x + 0.27 * u, l.screen.midY() - 0.03 * u}, 0.055 * u, paint(0.75));
+    drawText(c, "LOG", {t.x + 0.27 * u, l.screen.midY() + 0.035 * u}, 0.055 * u, paint(0.75));
+    bezelRect(c, l.screen.inset(-0.02 * u, -0.02 * u), u);
+    addRoundedRect(c, l.screen, 0.015 * u);
+    setColor(c, rgb(0.03, 0.012, 0.008));
+    cairo_fill(c);
+    // Every cathode dot, dark: the panel's grid shows faintly.
+    double p = l.dotPitch;
+    for (double x = l.dots.x; x < l.dots.maxX() - p * 0.5; x += p) {
+        for (int r = 0; r < dotmatrix::rows; r++) addEllipse(c, {x, l.dots.y + r * p, p * 0.74, p * 0.74});
+    }
+    setColor(c, rgb(plasma.r, plasma.g, plasma.b, 0.07));
+    cairo_fill(c);
+}
+
+/// The song as lit neon dots, with room around them for the glow.
+void InstrumentPanel::renderSong(const Layout& l) {
+    std::vector<uint8_t> cols = dotmatrix::columns(song);
+    if (!cols.empty()) cols.pop_back();
+    double p = l.dotPitch, m = 2 * p, scale = cacheScale;
+    if (songImage) cairo_surface_destroy(songImage);
+    songImage = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, int(std::ceil((cols.size() * p + 2 * m) * scale)) + 1,
+                                           int(std::ceil((7 * p + 2 * m) * scale)) + 1);
+    cairo_t* c = cairo_create(songImage);
+    cairo_scale(c, scale, scale);
+    auto dots = [&](double size) {
+        for (size_t x = 0; x < cols.size(); x++) {
+            for (int r = 0; r < dotmatrix::rows; r++) {
+                double o = (p * 0.74 - size) / 2;
+                if (cols[x] & (1 << r)) addEllipse(c, {m + x * p + o, m + r * p + o, size, size});
+            }
+        }
+    };
+    withShadow(c, 0, 0, p * 1.3, rgb(plasma.r, plasma.g * 0.8, plasma.b, 1), [&](cairo_t* c) {
+        dots(p * 0.78);
+        setColor(c, plasma);
+        cairo_fill(c);
+    });
+    dots(p * 0.42); // the hot centre of each glowing dot
+    setColor(c, rgb(1, 0.86, 0.66));
+    cairo_fill(c);
+    cairo_destroy(c);
+    songColumns = int(cols.size());
+    songRendered = song;
 }
 
 void InstrumentPanel::plate(cairo_t* c, Rect r, double u, const char* title) {
@@ -878,6 +960,13 @@ void InstrumentPanel::drawFronts(cairo_t* c, const Layout& l) {
     cairo_fill(c);
     linearGradient(c, s, {rgb(1, 1, 1, 0.08), rgb(1, 1, 1, 0)}, true, 0.5);
     cairo_restore(c);
+    // The song display's glass: a gloss across its top, and a fine mesh in front of the dots.
+    cairo_save(c);
+    addRoundedRect(c, l.screen, 0.015 * u);
+    cairo_clip(c);
+    linearGradient(c, l.screen, {rgb(1, 1, 1, 0.12), rgb(1, 1, 1, 0.02), rgb(1, 1, 1, 0)}, true, 0.6);
+    linearGradient(c, {l.screen.x, l.screen.maxY() - 2, l.screen.w, 2}, {rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.08)}, true);
+    cairo_restore(c);
     // Nixie tubes.
     for (Rect tube : nixieTubes(l)) {
         Rect g = nixieGlass(tube);
@@ -950,7 +1039,7 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         cairo_restore(c);
     }
 
-    // Velocity on the Nixie tubes, "00.00" to "10.00" (fractions of light speed). Under tidal stress they scramble.
+    // Velocity on the Nixie tubes, in multiples of light speed (up to 99.99). Under tidal stress they scramble.
     std::vector<Rect> tubes = nixieTubes(l);
     for (int k = 0; k < int(tubes.size()); k++) {
         Rect g = nixieGlass(tubes[k]);
@@ -1101,6 +1190,39 @@ void InstrumentPanel::drawDynamic(cairo_t* c, const Layout& l) {
         drawText(c, label, {s.midX(), s.midY() + s.h * 0.22}, s.h * 0.16, rgb(1, 0.5, 0.4));
     }
     cairo_restore(c);
+
+    // The song on the neon panel: a marquee that steps one dot column at a time when it doesn't fit.
+    if (song != songRendered || !songImage) renderSong(l);
+    {
+        double p = l.dotPitch, m = 2 * p;
+        int visible = int(std::lround(l.dots.w / p));
+        double glow = frand(0.94f, 1.0f) * (chaos > 0.02f && frand(0, 1) < chaos * 0.4f ? 0.15 : 1);
+        cairo_save(c);
+        addRoundedRect(c, l.screen, 0.015 * u);
+        cairo_clip(c);
+        auto paintSong = [&](double x) {
+            cairo_save(c);
+            cairo_translate(c, x - m, l.dots.y - m);
+            cairo_scale(c, 1 / cacheScale, 1 / cacheScale);
+            cairo_set_source_surface(c, songImage, 0, 0);
+            cairo_paint_with_alpha(c, glow);
+            cairo_restore(c);
+        };
+        if (songColumns <= visible) {
+            paintSong(l.dots.x + std::floor((visible - songColumns) / 2.0) * p);
+        } else {
+            int loop = songColumns + 12;
+            if (songScroll >= loop) {
+                songScroll = 0;
+                songHold = 1.5;
+            }
+            double x = l.dots.x - std::floor(songScroll) * p;
+            paintSong(x);
+            paintSong(x + loop * p);
+        }
+        paintFront(c); // the glass
+        cairo_restore(c);
+    }
 
     // Knob pointers.
     cairo_set_line_cap(c, CAIRO_LINE_CAP_ROUND);

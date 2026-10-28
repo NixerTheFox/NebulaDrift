@@ -33,6 +33,13 @@ jobs:
       - name: Render the test frames
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
 
+      - name: Print the dashboard renders (temporary, for review)
+        run: |
+          for n in dash_loud dash_blackhole loud; do
+            sips -s format jpeg -s formatOptions 70 -Z 1100 "build/snapshots/$n.png" --out "build/$n.jpg" >/dev/null
+            echo "BEGIN $n"; base64 -i "build/$n.jpg" | tr -d '\n'; echo; echo "END $n"
+          done
+
       - name: Benchmark the GPU
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-gpu'
 

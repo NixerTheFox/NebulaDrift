@@ -18,13 +18,17 @@ add_executable(nebuladrift
     src/audio.cpp
     src/renderer.cpp
     src/instruments.cpp
+    src/dashboard.cpp
+    src/dotmatrix.cpp
+    src/nowplaying.cpp
     src/cockpit.cpp
     src/draw.cpp
     src/miniaudio.c
 )
 target_include_directories(nebuladrift PRIVATE src third_party)
 target_compile_definitions(nebuladrift PRIVATE NEBULADRIFT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-# miniaudio loads the sound server's client library (PulseAudio/PipeWire, ALSA, JACK) at runtime.
+# miniaudio loads the sound server's client library (PulseAudio/PipeWire, ALSA, JACK) at runtime, and the song
+# display loads libdbus.
 target_link_libraries(nebuladrift PRIVATE PkgConfig::SDL2 PkgConfig::CAIRO OpenGL::GL Threads::Threads
                       ${CMAKE_DL_LIBS} m)
 set_source_files_properties(src/miniaudio.c PROPERTIES COMPILE_OPTIONS "-w")

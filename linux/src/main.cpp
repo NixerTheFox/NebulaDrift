@@ -3,9 +3,11 @@
 
 #include "audio.h"
 #include "cockpit.h"
+#include "dashboard.h"
 #include "draw.h"
 #include "gl.h"
 #include "instruments.h"
+#include "nowplaying.h"
 #include "renderer.h"
 
 #include <SDL.h>
@@ -325,10 +327,12 @@ public:
         if (settings.has("aberration")) renderer->aberration = settings.boolean("aberration");
         renderer->cockpitGlass = settings.boolean("cockpit");
         instrumentsHidden = settings.boolean("instrumentsHidden");
+        dashboardShown = settings.boolean("dashboard");
         statsShown = settings.boolean("showStats");
         renderer->onFrame = [this](const PanelInput& in, float dt) {
             if (instrumentsHidden) return;
-            panel.update(in, dt);
+            if (dashboardShown) dash.update(in, dt);
+            else panel.update(in, dt);
             // Redraw the console at about 60 Hz; the springs still integrate every frame.
             panelClock += dt;
             if (panelClock >= 1.0f / 62) {
@@ -337,6 +341,7 @@ public:
             }
         };
         sources.onStatus = [this](const std::string& s) { showHUD(s); };
+        nowPlaying.start();
         if (file.empty()) sources.startSystemAudio();
         else playFile(file);
         lastCPU = processCPUTime();
@@ -361,7 +366,7 @@ public:
 private:
     static constexpr const char* hints =
         "S  system audio    M  microphone    O  open file (or drop one)    F  full screen    I  instruments    "
-        "P  stats    T  fly into the next one    B  black hole\n"
+        "V  console or dashboard    P  stats    T  fly into the next one    B  black hole\n"
         "G  cockpit glass    D  dither style    Shift-D  dither strength    C  chromatic aberration    Q  quality    "
         "H  hints";
 
@@ -382,7 +387,7 @@ private:
             playFile(*path);
             delete path;
         } else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-            panelDirty = hudDirty = statsDirty = cockpitDirty = true;
+            panelDirty = hudDirty = statsDirty = cockpitDirty = glassDirty = true;
         }
     }
 
@@ -432,12 +437,22 @@ private:
             settings.set("instrumentsHidden", instrumentsHidden);
             panelDirty = true;
             break;
+        case SDLK_v:
+            dashboardShown = !dashboardShown;
+            settings.set("dashboard", dashboardShown);
+            if (instrumentsHidden) {
+                instrumentsHidden = false;
+                settings.set("instrumentsHidden", false);
+            }
+            panelDirty = glassDirty = true;
+            showHUD(dashboardShown ? "Instruments: digital dashboard" : "Instruments: Nixie console", 2);
+            break;
         case SDLK_s:
-            panel.source = InstrumentPanel::Source::system;
+            setSource(InstrumentPanel::Source::system);
             sources.startSystemAudio();
             break;
         case SDLK_m:
-            panel.source = InstrumentPanel::Source::mic;
+            setSource(InstrumentPanel::Source::mic);
             sources.startMicrophone();
             break;
         case SDLK_o:
@@ -489,8 +504,30 @@ private:
     }
 
     void playFile(const std::string& path) {
-        panel.source = InstrumentPanel::Source::file;
+        setSource(InstrumentPanel::Source::file);
+        fileTrack = NowPlaying::fromFile(path);
         sources.play(path);
+    }
+
+    void setSource(InstrumentPanel::Source s) {
+        panel.source = s;
+        dash.source = s;
+    }
+
+    /// The line on the song displays: the file playing, or what a media player reports while listening to
+    /// the system's audio.
+    std::string songText() {
+        auto describe = [](const Track& t) {
+            std::string s = t.artist.empty() ? t.title : t.artist + " - " + t.title;
+            return t.playing ? s : "PAUSED  " + s;
+        };
+        switch (panel.source) {
+        case InstrumentPanel::Source::file: return describe(fileTrack);
+        case InstrumentPanel::Source::mic: return "MICROPHONE  -  LIVE INPUT";
+        case InstrumentPanel::Source::system: break;
+        }
+        std::optional<Track> t = nowPlaying.current();
+        return t ? describe(*t) : "SYSTEM AUDIO  -  NO TRACK INFO";
     }
 
     void showHUD(const std::string& message, double seconds = 6) {
@@ -542,9 +579,33 @@ private:
             overlays.draw(cockpit, dw, dh);
         }
 
-        if (!instrumentsHidden) {
+        if (!instrumentsHidden && panelDirty) {
+            std::string song = songText();
+            panel.setSong(song);
+            dash.setSong(song);
+        }
+        if (!instrumentsHidden && dashboardShown) {
+            double strip = Dashboard::stripHeight(ww, wh);
+            int stripPx = int(std::ceil(strip * ratio));
+            if (panelDirty || console.width != dw || console.height != stripPx) {
+                cairo_t* c = console.begin(dw, stripPx, ratio);
+                dash.drawStrip(c, ww, wh);
+                console.end(c);
+                console.y = dh - console.height;
+                panelDirty = false;
+            }
+            if (glassDirty || dashGlass.width != dw || dashGlass.height != stripPx) {
+                cairo_t* c = dashGlass.begin(dw, stripPx, ratio);
+                dash.drawGlass(c, ww, wh);
+                dashGlass.end(c);
+                dashGlass.y = dh - dashGlass.height;
+                glassDirty = false;
+            }
+            overlays.draw(console, dw, dh);
+            overlays.draw(dashGlass, dw, dh);
+        } else if (!instrumentsHidden) {
             double strip = InstrumentPanel::stripHeight(ww, wh);
-            if (panelDirty || console.width != dw) {
+            if (panelDirty || console.width != dw || console.height != int(std::ceil(strip * ratio))) {
                 cairo_t* c = console.begin(dw, int(std::ceil(strip * ratio)), ratio);
                 panel.drawStrip(c, ww, wh);
                 console.end(c);
@@ -649,11 +710,14 @@ private:
     Settings settings;
     std::unique_ptr<Renderer> renderer;
     InstrumentPanel panel;
+    Dashboard dash;
+    NowPlaying nowPlaying;
+    Track fileTrack;
     OverlayRenderer overlays;
-    Overlay cockpit, console, alarm, hud, stats;
+    Overlay cockpit, console, dashGlass, alarm, hud, stats;
     bool running = true;
-    bool instrumentsHidden = false, statsShown = false, altQuality = false, cursorHidden = false;
-    bool panelDirty = true, hudDirty = true, statsDirty = true, cockpitDirty = true;
+    bool instrumentsHidden = false, dashboardShown = false, statsShown = false, altQuality = false, cursorHidden = false;
+    bool panelDirty = true, hudDirty = true, statsDirty = true, cockpitDirty = true, glassDirty = true;
     float panelClock = 0;
     std::string hudText, statsText = " measuring… ";
     double hudHideAt = -100;
@@ -716,6 +780,7 @@ static void runSnapshot(const std::string& resources, const std::string& dir) {
             return f;
         });
         r.ditherMode = look.dither;
+        panel.setSong(loud > 0.5f ? "Nebula Drift - Song Display" : "M83 - Outro");
         r.onFrame = [&](const PanelInput& in, float dt) { panel.update(in, dt); };
         for (int i = 0; i < 180; i++) r.step(1.0f / 60, 1600, 900);
         if (std::string(look.name) != "calm") {
@@ -723,6 +788,82 @@ static void runSnapshot(const std::string& resources, const std::string& dir) {
             r.step(1.0f / 60, 1600, 900);
         }
         write(r, 1600, 900, look.name, [&](cairo_t* c) { panel.draw(c, 1600, 900); });
+    }
+
+    // The digital dashboard: calm and loud, under tidal stress, and below the cockpit canopy.
+    struct DashLook {
+        const char* name;
+        float loud, stress;
+        bool cockpit;
+        const char* song;
+    };
+    for (DashLook look : {DashLook{"dash_calm", 0.15f, 0, false, "Boards of Canada - Dayvan Cowboy"},
+                          DashLook{"dash_loud", 1, 0, false,
+                                   "Daft Punk - Giorgio by Moroder (feat. Giorgio Moroder) — Random Access Memories"},
+                          DashLook{"dash_blackhole", 0.6f, 0.9f, false, "Hans Zimmer - Interstellar"},
+                          DashLook{"dash_cockpit", 0.8f, 0, true, "Kraftwerk - Autobahn"}}) {
+        float t = 0, loud = look.loud;
+        Dashboard dash;
+        dash.setSong(look.song);
+        Renderer r(shaders, [&](float dt) {
+            t += dt;
+            AudioFeatures f;
+            for (int i = 0; i < AudioAnalyzer::bandCount; i++) {
+                f.bands[i] = loud * (0.75f - float(i) / 140 + 0.2f * sinf(float(i) * 0.5f + t * 3));
+            }
+            f.bass = loud * 0.85f;
+            f.mid = loud * 0.6f;
+            f.treble = loud * 0.5f;
+            f.level = loud * 0.7f;
+            f.beat = loud * 0.6f;
+            f.beatAge = loud > 0.5f ? fmodf(t, 0.5f) : 10;
+            f.centroid = 0.4f;
+            return f;
+        });
+        r.cockpitGlass = look.cockpit;
+        r.onFrame = [&](const PanelInput& in, float dt) { dash.update(in, dt); };
+        for (int i = 0; i < 180; i++) r.step(1.0f / 60, 1600, 900);
+        if (look.stress > 0) r.placeBlackHoleForTesting(8, look.stress, 0.8f / 3.7f);
+        else r.placeObjectsForTesting();
+        for (int i = 0; i < 12; i++) r.step(1.0f / 60, 1600, 900);
+        write(r, 1600, 900, look.name, [&](cairo_t* c) {
+            if (look.cockpit) drawCockpitFrame(c, 1600, 900);
+            dash.draw(c, 1600, 900);
+        });
+    }
+    // Redraw cost of the dashboard and the console strips at 2x (what the app does about 60 times a second).
+    for (bool useDash : {false, true}) {
+        Dashboard dash;
+        InstrumentPanel panel;
+        dash.setSong("A song title long enough to need scrolling across the whole of the display, twice over");
+        panel.setSong("A song title long enough to need scrolling across the whole of the display, twice over");
+        double strip = useDash ? Dashboard::stripHeight(1600, 900) : InstrumentPanel::stripHeight(1600, 900);
+        cairo_surface_t* s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 3200, int(std::ceil(strip * 2)));
+        PanelInput in;
+        double t0 = 0;
+        for (int i = 0; i < 260; i++) {
+            if (i == 20) t0 = nowSeconds();
+            float t = i / 60.0f;
+            in.level = 0.6f + 0.3f * sinf(t * 3);
+            in.bass = 0.5f + 0.4f * sinf(t * 7);
+            in.mid = 0.5f + 0.3f * sinf(t * 3);
+            in.treble = 0.4f + 0.3f * sinf(t * 11);
+            in.beat = fmodf(t, 0.5f) < 0.1f ? 1 : 0;
+            in.speed = 0.9f + 0.5f * sinf(t);
+            if (useDash) dash.update(in, 1.0f / 60);
+            else panel.update(in, 1.0f / 60);
+            cairo_t* c = cairo_create(s);
+            cairo_set_operator(c, CAIRO_OPERATOR_CLEAR);
+            cairo_paint(c);
+            cairo_set_operator(c, CAIRO_OPERATOR_OVER);
+            cairo_scale(c, 2, 2);
+            if (useDash) dash.drawStrip(c, 1600, 900);
+            else panel.drawStrip(c, 1600, 900);
+            cairo_destroy(c);
+        }
+        std::printf("%s redraw (1600x900 @2x): %.2f ms\n", useDash ? "dashboard" : "console",
+                    (nowSeconds() - t0) / 240 * 1000);
+        cairo_surface_destroy(s);
     }
 
     // Fly-throughs: deep inside a nebula and a galaxy.

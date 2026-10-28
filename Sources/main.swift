@@ -1192,9 +1192,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hud: NSTextField!
     private var hudToken = 0
     private static let hints = "S  system audio    M  microphone    O  open file (or drop one)    " +
-                               "F  full screen    I  instruments    P  stats    T  fly into the next one    B  black hole\n" +
+                               "F  full screen    I  instruments    V  console or dashboard    P  stats    " +
+                               "T  fly into the next one    B  black hole\n" +
                                "G  cockpit glass    D  dither style    ⇧D  dither strength    C  chromatic aberration    Q  quality    H  hints"
     private let instruments = InstrumentPanelView()
+    private let dashboard = DashboardView()
+    private let dashGlass = DashboardGlassView()
+    private let nowPlaying = NowPlaying()
+    private var fileTrack = Track()
+    private var instrumentsHidden = false
+    private var dashboardShown = false
     private let stats = StatsOverlay()
     private let cockpit = CockpitFrameView()
     private var lastMouseMove = CACurrentMediaTime()
@@ -1238,7 +1245,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         instruments.frame = view.bounds
         instruments.autoresizingMask = [.width, .height]
         instruments.wantsLayer = true
-        instruments.isHidden = UserDefaults.standard.bool(forKey: "instrumentsHidden")
+        for v in [dashboard, dashGlass] as [NSView] {
+            v.frame = view.bounds
+            v.autoresizingMask = [.width, .height]
+            v.wantsLayer = true
+        }
+        dashGlass.layerContentsRedrawPolicy = .duringViewResize // drawn once per size
+        dashGlass.dashboard = dashboard.dashboard
+        instrumentsHidden = UserDefaults.standard.bool(forKey: "instrumentsHidden")
+        dashboardShown = UserDefaults.standard.bool(forKey: "dashboard")
+        showInstruments()
         cockpit.frame = view.bounds
         cockpit.autoresizingMask = [.width, .height]
         cockpit.wantsLayer = true
@@ -1246,6 +1262,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         view.addSubview(cockpit) // below the console, HUD and stats (added after)
         setCockpit(UserDefaults.standard.bool(forKey: "cockpit"))
         view.addSubview(instruments)
+        view.addSubview(dashboard)
+        view.addSubview(dashGlass)
 
         stats.source = { [weak self] in self?.renderer.takeStats() ?? (0, 0) }
         stats.translatesAutoresizingMaskIntoConstraints = false
@@ -1256,13 +1274,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ])
         stats.isHidden = !UserDefaults.standard.bool(forKey: "showStats")
         renderer.onFrame = { [weak self] input, dt in
-            guard let self, !self.instruments.isHidden else { return }
-            self.instruments.panel.update(input, dt: dt)
+            guard let self, !self.instrumentsHidden else { return }
+            if self.dashboardShown {
+                self.dashboard.dashboard.update(input, dt: dt)
+            } else {
+                self.instruments.panel.update(input, dt: dt)
+            }
             // Redraw the console at about 60 Hz; the springs still integrate every frame.
             self.panelClock += dt
             if self.panelClock >= 1 / 62 {
                 self.panelClock = 0
-                self.instruments.refresh()
+                let song = self.songText()
+                if self.dashboardShown {
+                    self.dashboard.dashboard.setSong(song)
+                    self.dashboard.refresh()
+                } else {
+                    self.instruments.panel.setSong(song)
+                    self.instruments.refresh()
+                }
             }
         }
 
@@ -1313,6 +1342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         sources.onStatus = { [weak self] in self?.showHUD($0) }
+        nowPlaying.start()
         sources.startSystemAudio()
     }
 
@@ -1349,8 +1379,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             renderer.spawnFlyThrough()
             showHUD("Course set: straight into the next one", seconds: 2)
         case "i":
-            instruments.isHidden.toggle()
-            UserDefaults.standard.set(instruments.isHidden, forKey: "instrumentsHidden")
+            instrumentsHidden.toggle()
+            UserDefaults.standard.set(instrumentsHidden, forKey: "instrumentsHidden")
+            showInstruments()
+        case "v":
+            dashboardShown.toggle()
+            instrumentsHidden = false
+            UserDefaults.standard.set(dashboardShown, forKey: "dashboard")
+            UserDefaults.standard.set(false, forKey: "instrumentsHidden")
+            showInstruments()
+            showHUD(dashboardShown ? "Instruments: digital dashboard" : "Instruments: Nixie console", seconds: 2)
         case "s": useSystemAudio()
         case "m": useMicrophone()
         case "o": openFile()
@@ -1388,23 +1426,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    /// The Nixie console or the digital dashboard (with its glass), unless the instruments are hidden.
+    private func showInstruments() {
+        instruments.isHidden = instrumentsHidden || dashboardShown
+        dashboard.isHidden = instrumentsHidden || !dashboardShown
+        dashGlass.isHidden = dashboard.isHidden
+    }
+
+    private func setSource(_ s: InstrumentPanel.Source) {
+        instruments.panel.source = s
+        dashboard.dashboard.source = s
+    }
+
+    /// The line on the song displays: the file playing, or what a media player reports while listening to the
+    /// system's audio.
+    private func songText() -> String {
+        func describe(_ t: Track) -> String {
+            let s = t.artist.isEmpty ? t.title : "\(t.artist) - \(t.title)"
+            return t.playing ? s : "PAUSED  " + s
+        }
+        switch instruments.panel.source {
+        case .file: return describe(fileTrack)
+        case .mic: return "MICROPHONE  -  LIVE INPUT"
+        case .system: return nowPlaying.current.map(describe) ?? "SYSTEM AUDIO  -  NO TRACK INFO"
+        }
+    }
+
     private func setCockpit(_ on: Bool) {
         renderer.cockpitGlass = on
         cockpit.isHidden = !on
     }
 
     @objc func useSystemAudio() {
-        instruments.panel.source = .system
+        setSource(.system)
         sources.startSystemAudio()
     }
 
     @objc func useMicrophone() {
-        instruments.panel.source = .mic
+        setSource(.mic)
         sources.startMicrophone()
     }
 
     private func playFile(_ url: URL) {
-        instruments.panel.source = .file
+        setSource(.file)
+        fileTrack = Track(title: url.deletingPathExtension().lastPathComponent)
+        NowPlaying.fromFile(url) { [weak self] in self?.fileTrack = $0 }
         sources.play(file: url)
     }
 
@@ -1483,6 +1549,7 @@ func runSnapshot(dir: String) throws {
             return f
         }
         renderer.ditherMode = dither
+        panel.setSong(loud > 0.5 ? "Nebula Drift - Song Display" : "M83 - Outro")
         renderer.onFrame = { panel.update($0, dt: $1) }
         for _ in 0..<180 { renderer.step(dt: 1 / 60, size: CGSize(width: 1600, height: 900)) }
         if name != "calm" {
@@ -1493,6 +1560,45 @@ func runSnapshot(dir: String) throws {
             panel.draw(in: $0, viewSize: CGSize(width: 1600, height: 900))
         }
     }
+    // The digital dashboard: calm and loud, under tidal stress, and below the cockpit canopy.
+    let dashLooks: [(String, Float, Float, Bool, String)] = [
+        ("dash_calm", 0.15, 0, false, "Boards of Canada - Dayvan Cowboy"),
+        ("dash_loud", 1, 0, false, "Daft Punk - Giorgio by Moroder (feat. Giorgio Moroder) — Random Access Memories"),
+        ("dash_blackhole", 0.6, 0.9, false, "Hans Zimmer - Interstellar"),
+        ("dash_cockpit", 0.8, 0, true, "Kraftwerk - Autobahn"),
+    ]
+    for (name, loud, stress, cockpit, song) in dashLooks {
+        var t: Float = 0
+        let dash = Dashboard()
+        dash.setSong(song)
+        let r = try Renderer(device: device, pixelFormat: .bgra8Unorm, shaderSource: source) { dt in
+            t += dt
+            var f = AudioFeatures()
+            f.bands = (0..<AudioAnalyzer.bandCount).map { i in
+                loud * (0.75 - Float(i) / 140 + 0.2 * sinf(Float(i) * 0.5 + t * 3))
+            }
+            f.bass = loud * 0.85
+            f.mid = loud * 0.6
+            f.treble = loud * 0.5
+            f.level = loud * 0.7
+            f.beat = loud * 0.6
+            f.beatAge = loud > 0.5 ? fmodf(t, 0.5) : 10
+            f.centroid = 0.4
+            return f
+        }
+        r.cockpitGlass = cockpit
+        r.onFrame = { dash.update($0, dt: $1) }
+        for _ in 0..<180 { r.step(dt: 1 / 60, size: CGSize(width: 1600, height: 900)) }
+        if stress > 0 { r.placeBlackHoleForTesting(zRs: 8, stress: stress, seed: 0.8 / 3.7) } else { r.placeObjectsForTesting() }
+        for _ in 0..<12 { r.step(dt: 1 / 60, size: CGSize(width: 1600, height: 900)) }
+        let frame = CockpitFrameView()
+        try r.snapshot(width: 1600, height: 900, to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png")) {
+            if cockpit { frame.drawFrame(in: $0, bounds: CGRect(x: 0, y: 0, width: 1600, height: 900)) }
+            dash.draw(in: $0, viewSize: CGSize(width: 1600, height: 900))
+            dash.drawGlass(in: $0, viewSize: CGSize(width: 1600, height: 900))
+        }
+    }
+
     // Fly-throughs: deep inside a nebula and a galaxy.
     for (name, galaxy, radius) in [("through_nebula", false, Float(12)), ("through_galaxy", true, Float(9))] {
         let r = try Renderer(device: device, pixelFormat: .bgra8Unorm, shaderSource: source) { _ in
@@ -1684,8 +1790,10 @@ func runSnapshot(dir: String) throws {
 /// resolution, calm and under tidal stress, and writes each last frame as a PNG.
 func runConsoleBench(dir: String, profileSeconds: Double = 0) {
     let cases: [(String, Int, Int, Int, Float)] = [("retina", 1600, 900, 2, 0), ("retina_alarm", 1600, 900, 2, 0.8),
-                                                    ("standard", 1280, 780, 1, 0)]
+                                                    ("standard", 1280, 780, 1, 0), ("dashboard_retina", 1600, 900, 2, 0),
+                                                    ("dashboard_standard", 1280, 780, 1, 0)]
     for (name, w, h, scale, alarm) in profileSeconds > 0 ? [cases[0]] : cases {
+        let useDash = name.hasPrefix("dashboard")
         let size = CGSize(width: w, height: h)
         let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         let ctx = CGContext(data: nil, width: w * scale, height: h * scale, bitsPerComponent: 8, bytesPerRow: 0,
@@ -1693,16 +1801,26 @@ func runConsoleBench(dir: String, profileSeconds: Double = 0) {
         ctx.translateBy(x: 0, y: CGFloat(h * scale))
         ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
         let panel = InstrumentPanel()
+        let dash = Dashboard()
+        let longSong = "A song title long enough to need scrolling across the whole of the display, twice over"
+        panel.setSong(longSong)
+        dash.setSong(longSong)
         var t: Float = 0
         func frame() {
             t += 1 / 60
             let bands = (0..<AudioAnalyzer.bandCount).map { i in 0.5 + 0.3 * sinf(Float(i) * 0.4 + t * 5) }
-            panel.update(PanelInput(bands: bands, bass: 0.5 + 0.4 * sinf(t * 7), mid: 0.5 + 0.3 * sinf(t * 3),
-                                    treble: 0.4 + 0.3 * sinf(t * 11), level: 0.6, beat: fmodf(t, 0.5) < 0.1 ? 1 : 0,
-                                    speed: 0.4 + 0.3 * sinf(t), hue: t * 0.05, centroid: 0.5, roll: t * 0.02,
-                                    alarm: alarm), dt: 1 / 60)
+            let input = PanelInput(bands: bands, bass: 0.5 + 0.4 * sinf(t * 7), mid: 0.5 + 0.3 * sinf(t * 3),
+                                   treble: 0.4 + 0.3 * sinf(t * 11), level: 0.6, beat: fmodf(t, 0.5) < 0.1 ? 1 : 0,
+                                   speed: 0.9 + 0.5 * sinf(t), hue: t * 0.05, centroid: 0.5, roll: t * 0.02,
+                                   alarm: alarm)
             ctx.clear(CGRect(origin: .zero, size: size))
-            panel.draw(in: ctx, viewSize: size)
+            if useDash {
+                dash.update(input, dt: 1 / 60)
+                dash.draw(in: ctx, viewSize: size)
+            } else {
+                panel.update(input, dt: 1 / 60)
+                panel.draw(in: ctx, viewSize: size)
+            }
         }
         for _ in 0..<20 { frame() }
         var count = 240
@@ -1719,6 +1837,7 @@ func runConsoleBench(dir: String, profileSeconds: Double = 0) {
         }
         let ms = (CACurrentMediaTime() - t0) / Double(count) * 1000
         print(String(format: "console redraw %@ (%dx%d @%dx): %.2f ms", name, w, h, scale, ms))
+        if useDash { dash.drawGlass(in: ctx, viewSize: size) } // in the saved frame, as on screen
         let url = URL(fileURLWithPath: dir).appendingPathComponent("console_\(name).png")
         if let image = ctx.makeImage(),
            let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {

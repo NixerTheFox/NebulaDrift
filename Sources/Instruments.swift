@@ -3,6 +3,13 @@
 
 import Cocoa
 
+/// The flight speed the loudest music reaches (the needles and readouts are scaled to it).
+let maxSpeed: Float = 1.65
+
+/// Flight speed in multiples of light speed, as the readouts show it: about 1 c in silence, well past 10 c when the
+/// music is loud, 99.99 c at most.
+func lightSpeedsFor(_ speed: Float) -> Float { min(0.7 * expf(3.1 * max(speed, 0)), 99.99) }
+
 struct PanelInput {
     var bands: [Float]
     var bass: Float
@@ -56,6 +63,11 @@ final class InstrumentPanel {
     private var chaosClock: Float = 0
     private var knobSpin: [CGFloat] = [0, 0, 0]
     private var distance: Double = 0 // travelled, in "AU", shown on the drum counter
+    private var song = ""
+    private var songScroll: Double = 0, songHold: Double = 0
+    private var songImage: CGImage?    // the song in lit dots
+    private var songRendered: String?
+    private var songColumns = 0
 
     /// Everything that can be drawn once per window size and scale, then stamped every frame.
     private struct Caches {
@@ -75,6 +87,7 @@ final class InstrumentPanel {
         var digits: [Sprite]        // lit Nixie numerals, from the digit box's top-left corner
         var drumDigits: [[CGImage]] // distance counter figures: [white, red][0...9], one drum cell each
         var alarm: [Sprite]         // the alarm banner, dim and flashing, in view coordinates
+        var songGlass: Sprite       // the song display's glass
         var lamps: [Int: Sprite] = [:] // status lamps by kind and warmth step, from the lamp's centre
     }
 
@@ -106,7 +119,7 @@ final class InstrumentPanel {
         gauges[0].step(to: mixed(i.bass, 0), dt: dt, stiffness: 140 * hard)
         gauges[1].step(to: mixed(i.mid, 1), dt: dt, stiffness: 140 * hard)
         gauges[2].step(to: mixed(i.treble, 2), dt: dt, stiffness: 140 * hard)
-        velocity.step(to: mixed(min(i.speed / 1.2, 1), 3), dt: dt, stiffness: 40 * hard * hard, damping: 9)
+        velocity.step(to: mixed(i.speed / maxSpeed, 3), dt: dt, stiffness: 40 * hard * hard, damping: 9)
         let n = i.bands.count
         for k in 0..<Self.faderCount {
             let lo = k * n / Self.faderCount, hi = max((k + 1) * n / Self.faderCount, lo + 1)
@@ -137,8 +150,9 @@ final class InstrumentPanel {
         let bulbTarget: Float = (chaos > 0.02 && Float.random(in: 0...1) < chaos * 0.25) ? 0.25 : 1
         bulb += (bulbTarget - bulb) * (1 - expf(-dt * 3)) 
 
-        // Nixie readout, 00.00 c ... 10.00 c: when a digit changes, the new cathode ignites and the old one leaves an afterglow.
-        let value = min(max(velocity.pos, 0), 1) * 10
+        // Nixie readout, 00.70 c ... 99.99 c: when a digit changes, the new cathode ignites and the old one leaves an
+        // afterglow.
+        let value = lightSpeedsFor(velocity.pos * maxSpeed)
         var digits = Array(String(format: "%04d", Int((value * 100).rounded(.down)))).map { Int(String($0)) ?? 0 }
         if chaos > 0.02 {
             for k in digits.indices where chaosTargets[21 + k] < chaos { digits[k] = Int.random(in: 0...9) }
@@ -152,9 +166,18 @@ final class InstrumentPanel {
             }
         }
         distance += Double(i.speed * dt) * 2.5
+        if songHold > 0 { songHold -= Double(dt) } else { songScroll += Double(dt) * 14 } // dot columns a second
         bands = i.bands
         bass = i.bass
         centroid = i.centroid
+    }
+
+    /// What the neon dot-matrix panel above the console shows (scrolling when it doesn't fit).
+    func setSong(_ text: String) {
+        guard text != song else { return }
+        song = text
+        songScroll = 0
+        songHold = 1.5
     }
 
     // MARK: Layout
@@ -166,6 +189,8 @@ final class InstrumentPanel {
         var panelTop: CGFloat
         var levers = CGRect.zero, gauges = CGRect.zero, dial = CGRect.zero
         var faders = CGRect.zero, scope = CGRect.zero, knobs = CGRect.zero, lamps = CGRect.zero
+        var tab = CGRect.zero, screen = CGRect.zero, dots = CGRect.zero // the song display: plate, screen, dot field
+        var dotPitch: CGFloat = 1
     }
 
     static func panelHeight(for size: CGSize) -> CGFloat {
@@ -175,12 +200,13 @@ final class InstrumentPanel {
     private func layout(for size: CGSize) -> Layout {
         let u = Self.panelHeight(for: size)
         let shadow = u * 0.15
-        var l = Layout(u: u, shadow: shadow, stripHeight: u + shadow, panelTop: shadow)
+        let top = u * 0.2 // room above the panel for the song display's plate
+        var l = Layout(u: u, shadow: shadow, stripHeight: u + top, panelTop: top)
         let widths: [CGFloat] = [0.8, 2.34, 1.5, 1.68, 1.4, 1.46, 0.6].map { $0 * u }
         let gap = 0.12 * u
         let total = widths.reduce(0, +) + gap * CGFloat(widths.count - 1)
         var x = (size.width - total) / 2
-        let y = shadow + 0.13 * u
+        let y = top + 0.13 * u
         let h = 0.74 * u
         var rects: [CGRect] = []
         for w in widths {
@@ -189,6 +215,13 @@ final class InstrumentPanel {
         }
         (l.levers, l.gauges, l.dial, l.faders, l.scope, l.knobs, l.lamps) =
             (rects[0], rects[1], rects[2], rects[3], rects[4], rects[5], rects[6])
+        l.tab = CGRect(x: size.width / 2 - 2.0 * u, y: top - 0.17 * u, width: 4.0 * u, height: 0.23 * u)
+        l.screen = CGRect(x: l.tab.minX + 0.52 * u, y: l.tab.minY + 0.035 * u, width: l.tab.width - 0.6 * u, height: 0.11 * u)
+        let p = l.screen.height * 0.78 / CGFloat(DotMatrix.rows)
+        l.dotPitch = p
+        let dotsX = l.screen.minX + 0.04 * u
+        l.dots = CGRect(x: dotsX, y: l.screen.minY + (l.screen.height - 7 * p) / 2,
+                        width: ((l.screen.maxX - 0.04 * u - dotsX) / p).rounded(.down) * p, height: 7 * p)
         return l
     }
 
@@ -279,7 +312,7 @@ final class InstrumentPanel {
         let panel = CGRect(x: 0, y: l.panelTop, width: width, height: u)
 
         // Shade cast onto the space view above the console.
-        linearGradient(c, CGRect(x: 0, y: 0, width: width, height: l.shadow),
+        linearGradient(c, CGRect(x: 0, y: l.panelTop - l.shadow, width: width, height: l.shadow),
                        [rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.55)], vertical: true)
 
         // Painted gunmetal with brushed grain.
@@ -338,6 +371,72 @@ final class InstrumentPanel {
         // A dim cabin: darken all the metalwork so only what's lit really glows.
         c.setFillColor(rgb(0, 0, 0, 0.42))
         c.fill(panel)
+        staticSongTab(c, l)
+    }
+
+    /// Colour of the song display's neon plasma glow.
+    private static let plasma = (r: CGFloat(1.0), g: CGFloat(0.46), b: CGFloat(0.14))
+
+    /// A raised plate on top of the console holding a neon plasma dot-matrix panel (like the Burroughs Self-Scan
+    /// displays of the 70s): the song that's playing glows on it in orange.
+    private func staticSongTab(_ c: CGContext, _ l: Layout) {
+        let u = l.u, t = l.tab
+        plate(c, t, u, title: nil)
+        c.saveGState()
+        c.addPath(CGPath(roundedRect: t, cornerWidth: 0.035 * u, cornerHeight: 0.035 * u, transform: nil))
+        c.clip()
+        c.setFillColor(rgb(0, 0, 0, 0.42))
+        c.fill(t)
+        c.restoreGState()
+        text("AUDIO", CGPoint(x: t.minX + 0.27 * u, y: l.screen.midY - 0.03 * u), size: 0.055 * u, color: paint(0.75))
+        text("LOG", CGPoint(x: t.minX + 0.27 * u, y: l.screen.midY + 0.035 * u), size: 0.055 * u, color: paint(0.75))
+        bezelRect(c, l.screen.insetBy(dx: -0.02 * u, dy: -0.02 * u), u)
+        c.addPath(CGPath(roundedRect: l.screen, cornerWidth: 0.015 * u, cornerHeight: 0.015 * u, transform: nil))
+        c.setFillColor(rgb(0.03, 0.012, 0.008))
+        c.fillPath()
+        // Every cathode dot, dark: the panel's grid shows faintly.
+        let p = l.dotPitch
+        var x = l.dots.minX
+        while x < l.dots.maxX - p * 0.5 {
+            for r in 0..<DotMatrix.rows {
+                c.addEllipse(in: CGRect(x: x, y: l.dots.minY + CGFloat(r) * p, width: p * 0.74, height: p * 0.74))
+            }
+            x += p
+        }
+        let (pr, pg, pb) = Self.plasma
+        c.setFillColor(rgb(pr, pg, pb, 0.07))
+        c.fillPath()
+    }
+
+    /// The song as lit neon dots, with room around them for the glow.
+    private func renderSong(_ l: Layout, scale: CGFloat) {
+        var cols = DotMatrix.columns(song)
+        if !cols.isEmpty { cols.removeLast() }
+        let p = l.dotPitch, m = 2 * p
+        let (pr, pg, pb) = Self.plasma
+        songImage = render(CGRect(x: 0, y: 0, width: CGFloat(cols.count) * p + 2 * m, height: 7 * p + 2 * m),
+                           scale: scale) { c in
+            func dots(_ size: CGFloat) {
+                for (x, bits) in cols.enumerated() {
+                    for r in 0..<DotMatrix.rows where bits & (1 << r) != 0 {
+                        let o = (p * 0.74 - size) / 2
+                        c.addEllipse(in: CGRect(x: m + CGFloat(x) * p + o, y: m + CGFloat(r) * p + o, width: size,
+                                                height: size))
+                    }
+                }
+            }
+            c.saveGState()
+            c.setShadow(offset: .zero, blur: p * 1.3 * scale, color: self.rgb(pr, pg * 0.8, pb, 1))
+            dots(p * 0.78)
+            c.setFillColor(self.rgb(pr, pg, pb))
+            c.fillPath()
+            c.restoreGState()
+            dots(p * 0.42) // the hot centre of each glowing dot
+            c.setFillColor(self.rgb(1, 0.86, 0.66))
+            c.fillPath()
+        }
+        songColumns = cols.count
+        songRendered = song
     }
 
     private func plate(_ c: CGContext, _ r: CGRect, _ u: CGFloat, title: String?) {
@@ -874,7 +973,7 @@ final class InstrumentPanel {
             c.restoreGState()
         }
 
-        // Velocity on the Nixie tubes, "00.00" to "10.00" (fractions of light speed). Under tidal stress they scramble.
+        // Velocity on the Nixie tubes, in multiples of light speed (up to 99.99). Under tidal stress they scramble.
         for (i, tube) in nixieTubes(l).enumerated() {
             let g = nixieGlass(tube)
             let box = digitBox(g)
@@ -984,6 +1083,35 @@ final class InstrumentPanel {
                  size: s.height * 0.16, color: NSColor(red: 1, green: 0.5, blue: 0.4, alpha: 1))
         }
         c.restoreGState()
+
+        // The song on the neon panel: a marquee that steps one dot column at a time when it doesn't fit.
+        if song != songRendered || songImage == nil { renderSong(l, scale: k.scale) }
+        if let image = songImage {
+            let p = l.dotPitch, m = 2 * p
+            let visible = Int((l.dots.width / p).rounded())
+            let glow = CGFloat(Float.random(in: 0.94...1.0)) * (chaos > 0.02 && Float.random(in: 0...1) < chaos * 0.4 ? 0.15 : 1)
+            c.saveGState()
+            c.addPath(CGPath(roundedRect: l.screen, cornerWidth: 0.015 * u, cornerHeight: 0.015 * u, transform: nil))
+            c.clip()
+            func paintSong(_ x: CGFloat) {
+                drawImage(c, image, in: CGRect(x: x - m, y: l.dots.minY - m, width: CGFloat(image.width) / k.scale,
+                                               height: CGFloat(image.height) / k.scale), alpha: glow)
+            }
+            if songColumns <= visible {
+                paintSong(l.dots.minX + (CGFloat(visible - songColumns) / 2).rounded(.down) * p)
+            } else {
+                let loop = songColumns + 12
+                if songScroll >= Double(loop) {
+                    songScroll = 0
+                    songHold = 1.5
+                }
+                let x = l.dots.minX - CGFloat(songScroll.rounded(.down)) * p
+                paintSong(x)
+                paintSong(x + CGFloat(loop) * p)
+            }
+            drawSprite(c, k.songGlass, at: .zero)
+            c.restoreGState()
+        }
 
         // Knob pointers.
         for i in 0..<3 {
@@ -1203,9 +1331,10 @@ final class InstrumentPanel {
         fronts += tubes.map { piece(nixieGlass($0)) }
         fronts += [piece(counterWindow(l)), piece(scopeScreen(l))]
 
+        songRendered = nil
         return Caches(size: viewSize, scale: scale, strip: strip, back: back, fronts: fronts, litFaces: litFaces,
                       hazedTubes: hazedTubes, lever: lever, cap: cap, bulb: bulb, dot: dot, digits: digits,
-                      drumDigits: drumDigits, alarm: alarm)
+                      drumDigits: drumDigits, alarm: alarm, songGlass: piece(l.screen))
     }
 
     /// A status lamp at a given warmth, with its glow, anchored at its centre.
@@ -1267,6 +1396,15 @@ final class InstrumentPanel {
             c.fill(CGRect(x: win.minX + CGFloat(i + 1) * dw - 0.5, y: win.minY, width: 1, height: win.height))
         }
         linearGradient(c, win, [rgb(0, 0, 0, 0.75), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.75)], vertical: true)
+        c.restoreGState()
+        // The song display's glass: a gloss across its top, and its lower edge catching the light.
+        c.saveGState()
+        c.addPath(CGPath(roundedRect: l.screen, cornerWidth: 0.015 * u, cornerHeight: 0.015 * u, transform: nil))
+        c.clip()
+        linearGradient(c, l.screen, [rgb(1, 1, 1, 0.12), rgb(1, 1, 1, 0.02), rgb(1, 1, 1, 0)], vertical: true,
+                       endFraction: 0.6)
+        linearGradient(c, CGRect(x: l.screen.minX, y: l.screen.maxY - 2, width: l.screen.width, height: 2),
+                       [rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.08)], vertical: true)
         c.restoreGState()
         // Scope: scanlines and the glass.
         let s = scopeScreen(l)
@@ -1388,7 +1526,7 @@ final class InstrumentPanelView: NSView {
         if panel.alarmActive || alarmWasActive {
             needsDisplay = true // the alarm banner sits outside the console strip
         } else {
-            let h = InstrumentPanel.panelHeight(for: bounds.size) * 1.2
+            let h = InstrumentPanel.panelHeight(for: bounds.size) * 1.25
             setNeedsDisplay(NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h))
         }
         alarmWasActive = panel.alarmActive

@@ -6,8 +6,18 @@
 #include "audio.h"
 #include "draw.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <string>
 #include <vector>
+
+/// The flight speed the loudest music reaches (the needles and readouts are scaled to it).
+constexpr float maxSpeed = 1.65f;
+
+/// Flight speed in multiples of light speed, as the readouts show it: about 1 c in silence, well past 10 c when the
+/// music is loud, 99.99 c at most.
+inline float lightSpeedsFor(float speed) { return std::min(0.7f * std::exp(3.1f * std::max(speed, 0.0f)), 99.99f); }
 
 struct PanelInput {
     std::array<float, AudioFeatures::bandCount> bands{};
@@ -48,6 +58,8 @@ public:
     Source source = Source::system;
 
     void update(const PanelInput& i, float rawDt);
+    /// What the neon dot-matrix panel above the console shows (scrolling when it doesn't fit).
+    void setSong(const std::string& text);
 
     static double panelHeight(double width, double height);
     /// Height of the console strip (panel plus the shade it casts upward).
@@ -69,6 +81,8 @@ private:
     struct Layout {
         double u, shadow, stripHeight, panelTop;
         Rect levers, gauges, dial, faders, scope, knobs, lamps;
+        Rect tab, screen, dots; // the song display: its raised plate, the screen, and the field of dots
+        double dotPitch;
     };
 
     Layout layout(double width, double height) const;
@@ -93,6 +107,8 @@ private:
     void staticScope(cairo_t* c, const Layout& l);
     void staticKnobs(cairo_t* c, const Layout& l);
     void staticLamps(cairo_t* c, const Layout& l);
+    void staticSongTab(cairo_t* c, const Layout& l);
+    void renderSong(const Layout& l);
 
     Rect leverSlot(Rect r, int k, double u) const;
     Rect gaugeFace(const Layout& l, int k) const;
@@ -145,6 +161,10 @@ private:
     float chaosClock = 0;
     std::array<double, 3> knobSpin{};
     double distance = 0; // travelled, in "AU", shown on the drum counter
+    std::string song, songRendered;
+    double songScroll = 0, songHold = 0;
+    int songColumns = 0;
+    cairo_surface_t* songImage = nullptr; // the song in lit dots
 
     cairo_surface_t* cache = nullptr;      // everything that never moves
     cairo_surface_t* frontCache = nullptr; // the Nixie tubes' cage and glass, drawn over the lit digits
