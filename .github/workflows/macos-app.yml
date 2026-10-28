@@ -45,7 +45,10 @@ jobs:
 
       - name: Render the test frames (needs a GPU)
         continue-on-error: true
-        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
+        run: |
+          system_profiler SPDisplaysDataType | grep -E "Chipset|Metal" || true
+          sudo DevToolsSecurity -enable >/dev/null 2>&1 || true
+          lldb --batch -o run -o "bt 25" -- "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots
 
       - uses: actions/upload-artifact@v4
         with:
