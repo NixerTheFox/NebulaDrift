@@ -1453,6 +1453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 /// `--snapshot <dir>` renders a calm and a loud frame with synthetic audio, for testing without a window.
 func runSnapshot(dir: String) throws {
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     guard let device = MTLCreateSystemDefaultDevice(),
           let url = Bundle.main.url(forResource: "Shaders", withExtension: "metal") else {
         throw NSError(domain: "NebulaDrift", code: 2)
@@ -1542,6 +1543,12 @@ func runSnapshot(dir: String) throws {
         for _ in 0..<10 { try plain.snapshot(width: 1512, height: 900, to: url) }
         let without = (CACurrentMediaTime() - t1) * 100
         print(String(format: "frame with black hole %.1f ms, without %.1f ms (both incl. PNG write)", withHole, without))
+        plain.cockpitGlass = true
+        plain.step(dt: 1 / 60, size: CGSize(width: 1512, height: 900))
+        try plain.snapshot(width: 1512, height: 900, to: url)
+        let t2 = CACurrentMediaTime()
+        for _ in 0..<10 { try plain.snapshot(width: 1512, height: 900, to: url) }
+        print(String(format: "frame with cockpit glass %.1f ms (incl. PNG write)", (CACurrentMediaTime() - t2) * 100))
     }
 
     // Black hole variants: standard, quasar, bare, torus (seeds chosen so fract(seed * 3.7) picks each kind).

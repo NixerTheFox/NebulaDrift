@@ -29,26 +29,26 @@ jobs:
       - name: Benchmark the console
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench'
 
-      - name: Compare the console with the version before the optimizations (same machine)
-        run: |
-          mkdir -p build/old
-          git show 37b02b9:Sources/Instruments.swift > build/old/Instruments.swift
-          swiftc -O -swift-version 5 -target arm64-apple-macos14.2 -o build/old/NebulaDrift \
-            $(ls Sources/*.swift | grep -v Instruments.swift) build/old/Instruments.swift 2>/dev/null
-          for round in 1 2 3; do
-            echo "-- before:"; build/old/NebulaDrift --bench-console build/old/bench
-            echo "-- after:"; "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench
-          done
-
       - name: Compile the Metal shaders
         run: xcrun -sdk macosx metal -c Sources/Shaders.metal -o build/Shaders.air
 
-      - name: Render the test frames (needs a GPU)
-        continue-on-error: true
+      - name: Render the test frames
+        run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
+
+      - name: Compare GPU cost with the version before the GPU optimizations (same machine)
         run: |
-          system_profiler SPDisplaysDataType | grep -E "Chipset|Metal" || true
-          sudo DevToolsSecurity -enable >/dev/null 2>&1 || true
-          lldb --batch -o run -o "bt 25" -- "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots
+          rm -rf build/old && mkdir -p build/old/src
+          for f in main Instruments Cockpit Stats; do git show 81fe7ae:Sources/$f.swift > build/old/src/$f.swift; done
+          ditto "build/Nebula Drift.app" "build/old/Nebula Drift.app"
+          git show 81fe7ae:Sources/Shaders.metal > "build/old/Nebula Drift.app/Contents/Resources/Shaders.metal"
+          swiftc -O -swift-version 5 -target arm64-apple-macos14.2 -o "build/old/Nebula Drift.app/Contents/MacOS/NebulaDrift" \
+            build/old/src/*.swift 2>/dev/null
+          codesign --force --sign - "build/old/Nebula Drift.app"
+          mkdir -p build/old/snapshots
+          for round in 1 2; do
+            echo "-- before:"; "build/old/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/old/snapshots | grep "frame with"
+            echo "-- after:"; "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots | grep "frame with"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
