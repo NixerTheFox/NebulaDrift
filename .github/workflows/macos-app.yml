@@ -35,19 +35,21 @@ jobs:
       - name: Render the test frames
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots'
 
-      - name: Compare GPU cost with the version before the GPU optimizations (same machine)
+      - name: Compare GPU time with the version before the GPU optimizations (same machine)
         run: |
+          # The renderer from before the black hole and glass changes, with the same GPU benchmark.
           rm -rf build/old && mkdir -p build/old/src
           for f in main Instruments Cockpit Stats; do git show 81fe7ae:Sources/$f.swift > build/old/src/$f.swift; done
+          cp Sources/GPUBench.swift build/old/src/
+          perl -pi -e 's/^let args = CommandLine.arguments$/if CommandLine.arguments.contains("--bench-gpu") { runGPUBench(); exit(0) }\nlet args = CommandLine.arguments/' build/old/src/main.swift
           ditto "build/Nebula Drift.app" "build/old/Nebula Drift.app"
           git show 81fe7ae:Sources/Shaders.metal > "build/old/Nebula Drift.app/Contents/Resources/Shaders.metal"
           swiftc -O -swift-version 5 -target arm64-apple-macos14.2 -o "build/old/Nebula Drift.app/Contents/MacOS/NebulaDrift" \
-            build/old/src/*.swift 2>/dev/null
+            build/old/src/*.swift 2>&1 | grep -E "error" || true
           codesign --force --sign - "build/old/Nebula Drift.app"
-          mkdir -p build/old/snapshots
           for round in 1 2; do
-            echo "-- before:"; "build/old/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/old/snapshots | grep "frame with"
-            echo "-- after:"; "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --snapshot build/snapshots | grep "frame with"
+            echo "-- before:"; "build/old/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-gpu
+            echo "-- after:"; "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-gpu
           done
 
       - uses: actions/upload-artifact@v4

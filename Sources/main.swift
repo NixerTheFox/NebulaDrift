@@ -1724,6 +1724,10 @@ func runConsoleBench(dir: String, profileSeconds: Double = 0) {
 }
 
 let args = CommandLine.arguments
+if args.contains("--bench-gpu") {
+    runGPUBench()
+    exit(0)
+}
 if let i = args.firstIndex(of: "--bench-console"), i + 1 < args.count {
     try? FileManager.default.createDirectory(atPath: args[i + 1], withIntermediateDirectories: true)
     let seconds = args.firstIndex(of: "--profile-seconds").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil }
