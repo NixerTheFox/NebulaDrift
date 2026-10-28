@@ -46,7 +46,7 @@ private:
         std::array<Rect, 3> speedDigits;
         std::array<Rect, 2> rpmDigits;
         std::array<Rect, 7> odoDigits;
-        Rect peak, arrowLeft, arrowRight;
+        Rect peak;
         double dotPitch;
     };
     static constexpr int tachColumns = 46, barSegments = 12, fluxSegments = 12;
@@ -69,7 +69,7 @@ private:
     std::array<InstrumentPanel::Spring, 3> bars{};
     std::array<float, 3> peaks{}, peakAge{};
     std::array<float, 7> lampGlow{}; // WARP, TIDAL, BEAT, SYS, MIC, FILE, PEAK
-    float beatLamp = 0, arrows = 0;
+    float beatLamp = 0;
     double distance = 0; // light-years, on the trip meter
     float lightSpeeds = 0;
 

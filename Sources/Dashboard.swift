@@ -21,7 +21,7 @@ final class Dashboard {
     private var bars = [InstrumentPanel.Spring](repeating: .init(), count: 3)
     private var peaks: [Float] = [0, 0, 0], peakAge: [Float] = [0, 0, 0]
     private var lampGlow = [Float](repeating: 0, count: 7) // WARP, TIDAL, BEAT, SYS, MIC, FILE, PEAK
-    private var beatLamp: Float = 0, arrows: Float = 0
+    private var beatLamp: Float = 0
     private var distance: Double = 0 // light-years, on the trip meter
     private var lightSpeeds: Float = 0
 
@@ -63,13 +63,11 @@ final class Dashboard {
         distance += Double(lightSpeeds * dt) * 0.1
 
         beatLamp = max(beatLamp * expf(-dt * 7), i.beat)
-        arrows = max(arrows * expf(-dt * 5), i.beat > 0.5 ? 1 : 0) // the hazard arrows flash on the beat
         let peakLit: Float = max(bars[0].pos, bars[1].pos, bars[2].pos) > 0.93 ? 1 : 0
         var on: [Float] = [lightSpeeds >= 10 ? 1 : 0, chaos > 0.02 && sin(time * 11) > 0 ? 1 : 0, beatLamp,
                            source == .system ? 1 : 0, source == .mic ? 1 : 0, source == .file ? 1 : 0, peakLit]
         if chaos > 0.02 {
             for k in on.indices where k != 1 { on[k] = chaosTargets[6 + k] > 0.5 ? 1 : on[k] * (1 - chaos) }
-            arrows = sin(time * 17) > 0 ? 1 : 0
         }
         for k in on.indices {
             // Fluorescent segments light almost at once and fade out quickly.
@@ -100,7 +98,7 @@ final class Dashboard {
         var flux = CGRect.zero, speedBox = CGRect.zero, tach = CGRect.zero
         var bars: [CGRect] = [], lamps: [CGRect] = [], warp: [CGRect] = [], scaleDots: [CGPoint] = []
         var speedDigits: [CGRect] = [], rpmDigits: [CGRect] = [], odoDigits: [CGRect] = []
-        var peak = CGRect.zero, arrowLeft = CGRect.zero, arrowRight = CGRect.zero
+        var peak = CGRect.zero
         var dotPitch: CGFloat = 1
     }
 
@@ -152,8 +150,6 @@ final class Dashboard {
         let lampX: [CGFloat] = [1.62, 1.85, 2.4, 2.63, 2.86, 3.09]
         l.lamps = lampX.map { CGRect(x: f.minX + $0 * u, y: f.minY + 0.035 * u, width: 0.2 * u, height: 0.07 * u) }
         l.peak = CGRect(x: f.minX + 4.25 * u, y: f.minY + 0.06 * u, width: 0.13 * u, height: 0.06 * u)
-        l.arrowLeft = CGRect(x: f.minX + 0.75 * u, y: f.minY + 0.17 * u, width: 0.2 * u, height: 0.1 * u)
-        l.arrowRight = CGRect(x: f.minX + 3.35 * u, y: f.minY + 0.17 * u, width: 0.2 * u, height: 0.1 * u)
         return l
     }
 
@@ -206,13 +202,6 @@ final class Dashboard {
     private func addDecimalPoint(_ p: CGMutablePath, _ cell: CGRect) {
         let r = cell.width * 0.09
         p.addEllipse(in: CGRect(x: cell.maxX + cell.width * 0.06, y: cell.maxY - 2 * r, width: 2 * r, height: 2 * r))
-    }
-
-    private func addArrow(_ p: CGMutablePath, _ r: CGRect, left: Bool) {
-        let s: CGFloat = left ? -1 : 1
-        let pts: [(CGFloat, CGFloat)] = [(-1, -0.32), (0.15, -0.32), (0.15, -1), (1, 0), (0.15, 1), (0.15, 0.32), (-1, 0.32)]
-        p.addLines(between: pts.map { CGPoint(x: r.midX + s * $0.0 * r.width / 2, y: r.midY + $0.1 * r.height / 2) })
-        p.closeSubpath()
     }
 
     /// Segment `k` (0 = bottom) of a vertical bar gauge.
@@ -322,8 +311,6 @@ final class Dashboard {
         for d in l.scaleDots {
             segments.addEllipse(in: CGRect(x: d.x - 0.012 * u, y: d.y - 0.012 * u, width: 0.024 * u, height: 0.024 * u))
         }
-        addArrow(segments, l.arrowLeft, left: true)
-        addArrow(segments, l.arrowRight, left: false)
         fill(segments, Self.vfd)
 
         // Warning lamps: coloured windows with their legend in black.
@@ -530,7 +517,7 @@ final class Dashboard {
         var back: CGImage
         // The lit-segment layer, cut into the pieces that light up together (Core Graphics processes a whole image
         // on every draw, however tightly it is clipped).
-        var flux: Sprite, bars: [Sprite], tach: Sprite, warp: Sprite, scaleDots: [Sprite], arrows: [Sprite]
+        var flux: Sprite, bars: [Sprite], tach: Sprite, warp: Sprite, scaleDots: [Sprite]
         var lamps: [Sprite]       // the six lamps, then PEAK
         var digits: [[CGImage]]   // 0-9, blank, "-" for the speed, revs and trip digits
         var digitMargin: [CGFloat]
@@ -606,7 +593,6 @@ final class Dashboard {
                       tach: piece(l.tach.insetBy(dx: -g, dy: -g)), warp: piece(warp),
                       scaleDots: l.scaleDots.map { piece(CGRect(x: $0.x - 0.03 * u, y: $0.y - 0.03 * u, width: 0.06 * u,
                                                                 height: 0.06 * u)) },
-                      arrows: [piece(l.arrowLeft.insetBy(dx: -g, dy: -g)), piece(l.arrowRight.insetBy(dx: -g, dy: -g))],
                       lamps: lamps, digits: digits, digitMargin: margins)
     }
 
@@ -690,7 +676,6 @@ final class Dashboard {
         }
         let marks: [Float] = [1, 2, 5, 10, 20, 50]
         if let j = marks.lastIndex(where: { lightSpeeds >= $0 }) { paint(k.scaleDots[j], alpha: flicker) }
-        k.arrows.forEach { paint($0, alpha: CGFloat(arrows) * flicker) }
         for (i, lamp) in k.lamps.enumerated() { paint(lamp, alpha: CGFloat(lampGlow[i]) * flicker) }
 
         // Seven-segment readouts.

@@ -68,7 +68,6 @@ void Dashboard::update(const PanelInput& i, float rawDt) {
     distance += double(lightSpeeds) * dt * 0.1;
 
     beatLamp = std::max(beatLamp * expf(-dt * 7), i.beat);
-    arrows = std::max(arrows * expf(-dt * 5), i.beat > 0.5f ? 1.0f : 0.0f); // the hazard arrows flash on the beat
     float peakLit = std::max({bars[0].pos, bars[1].pos, bars[2].pos}) > 0.93f ? 1 : 0;
     std::array<float, 7> on{lightSpeeds >= 10 ? 1.0f : 0.0f, chaos > 0.02f && std::sin(time * 11) > 0 ? 1.0f : 0.0f,
                             beatLamp, source == Source::system ? 1.0f : 0.0f, source == Source::mic ? 1.0f : 0.0f,
@@ -77,7 +76,6 @@ void Dashboard::update(const PanelInput& i, float rawDt) {
         for (int k = 0; k < 7; k++) {
             if (k != 1) on[k] = chaosTargets[6 + k] > 0.5f ? 1 : on[k] * (1 - chaos);
         }
-        arrows = std::sin(time * 17) > 0 ? 1.0f : 0.0f;
     }
     for (int k = 0; k < 7; k++) {
         // Fluorescent segments light almost at once and fade out quickly.
@@ -140,8 +138,6 @@ Dashboard::Layout Dashboard::layout(double width, double height) const {
     for (int k = 0; k < 2; k++) l.lamps[k] = {f.x + (1.62 + 0.23 * k) * u, f.y + 0.035 * u, 0.2 * u, 0.07 * u};
     for (int k = 0; k < 4; k++) l.lamps[2 + k] = {f.x + (2.4 + 0.23 * k) * u, f.y + 0.035 * u, 0.2 * u, 0.07 * u};
     l.peak = {f.x + 4.25 * u, f.y + 0.06 * u, 0.13 * u, 0.06 * u};
-    l.arrowLeft = {f.x + 0.75 * u, f.y + 0.17 * u, 0.2 * u, 0.1 * u};
-    l.arrowRight = {f.x + 3.35 * u, f.y + 0.17 * u, 0.2 * u, 0.1 * u};
     return l;
 }
 
@@ -199,14 +195,6 @@ static void addDecimalPoint(cairo_t* c, Rect cell) {
     addEllipse(c, {cell.maxX() + cell.w * 0.06, cell.maxY() - 2 * r, 2 * r, 2 * r});
 }
 
-static void addArrow(cairo_t* c, Rect r, bool left) {
-    double s = left ? -1 : 1, cx = r.midX(), cy = r.midY();
-    auto P = [&](double x, double y) { cairo_line_to(c, cx + s * x * r.w / 2, cy + y * r.h / 2); };
-    cairo_new_sub_path(c);
-    P(-1, -0.32), P(0.15, -0.32), P(0.15, -1), P(1, 0), P(0.15, 1), P(0.15, 0.32), P(-1, 0.32);
-    cairo_close_path(c);
-}
-
 /// Segment `k` (0 = bottom) of a vertical bar gauge.
 static Rect barSegment(Rect bar, int k, int count) {
     double h = bar.h / count;
@@ -257,8 +245,6 @@ void Dashboard::drawSegments(cairo_t* c, const Layout& l, bool on) {
     }
     for (const Rect& w : l.warp) addRect(c, w);
     for (const Pt& d : l.scaleDots) addEllipse(c, {d.x - 0.012 * u, d.y - 0.012 * u, 0.024 * u, 0.024 * u});
-    addArrow(c, l.arrowLeft, true);
-    addArrow(c, l.arrowRight, false);
     fill(vfd);
 
     // Warning lamps: coloured windows with their legend in black.
@@ -564,7 +550,6 @@ void Dashboard::drawDynamic(cairo_t* c, const Layout& l) {
             break;
         }
     }
-    for (Rect r : {l.arrowLeft, l.arrowRight}) paintLit(c, r.inset(-g, -g), arrows * flicker);
     // (Lamps sit close together: only a little of the glow around each, so as not to light the next one.)
     for (int k = 0; k < 7; k++) {
         paintLit(c, (k < 6 ? l.lamps[k] : l.peak).inset(-0.012 * u, -g), lampGlow[k] * flicker);
