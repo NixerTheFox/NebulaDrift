@@ -1599,9 +1599,10 @@ func runSnapshot(dir: String) throws {
 
 /// `--bench-console <dir>` times the instrument console's redraw (CPU only, no GPU needed) at Retina and normal
 /// resolution, calm and under tidal stress, and writes each last frame as a PNG.
-func runConsoleBench(dir: String) {
-    for (name, w, h, scale, alarm) in [("retina", 1600, 900, 2, Float(0)), ("retina_alarm", 1600, 900, 2, 0.8),
-                                       ("standard", 1280, 780, 1, 0)] {
+func runConsoleBench(dir: String, profileSeconds: Double = 0) {
+    let cases: [(String, Int, Int, Int, Float)] = [("retina", 1600, 900, 2, 0), ("retina_alarm", 1600, 900, 2, 0.8),
+                                                    ("standard", 1280, 780, 1, 0)]
+    for (name, w, h, scale, alarm) in profileSeconds > 0 ? [cases[0]] : cases {
         let size = CGSize(width: w, height: h)
         let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         let ctx = CGContext(data: nil, width: w * scale, height: h * scale, bitsPerComponent: 8, bytesPerRow: 0,
@@ -1621,9 +1622,18 @@ func runConsoleBench(dir: String) {
             panel.draw(in: ctx, viewSize: size)
         }
         for _ in 0..<20 { frame() }
-        let count = 240
+        var count = 240
         let t0 = CACurrentMediaTime()
-        for _ in 0..<count { frame() }
+        if profileSeconds > 0 {
+            // Keep redrawing for a profiler to sample.
+            count = 0
+            while CACurrentMediaTime() - t0 < profileSeconds {
+                frame()
+                count += 1
+            }
+        } else {
+            for _ in 0..<count { frame() }
+        }
         let ms = (CACurrentMediaTime() - t0) / Double(count) * 1000
         print(String(format: "console redraw %@ (%dx%d @%dx): %.2f ms", name, w, h, scale, ms))
         let url = URL(fileURLWithPath: dir).appendingPathComponent("console_\(name).png")
@@ -1638,7 +1648,8 @@ func runConsoleBench(dir: String) {
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--bench-console"), i + 1 < args.count {
     try? FileManager.default.createDirectory(atPath: args[i + 1], withIntermediateDirectories: true)
-    runConsoleBench(dir: args[i + 1])
+    let seconds = args.firstIndex(of: "--profile-seconds").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil }
+    runConsoleBench(dir: args[i + 1], profileSeconds: seconds ?? 0)
     exit(0)
 }
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {

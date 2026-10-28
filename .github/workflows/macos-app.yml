@@ -27,6 +27,16 @@ jobs:
       - name: Benchmark the console
         run: '"build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/bench'
 
+      - name: Profile the console (Retina)
+        run: |
+          "build/Nebula Drift.app/Contents/MacOS/NebulaDrift" --bench-console build/profile --profile-seconds 12 &
+          sleep 2
+          sample $! 6 -file build/sample.txt >/dev/null 2>&1 || true
+          wait
+          # The busiest functions (own time), then the call tree's heaviest lines.
+          sed -n '/Sort by top of stack/,$p' build/sample.txt | head -60
+          awk '/Call graph:/,/Total number in stack/' build/sample.txt | grep -E "InstrumentPanel|CGContext|CGSImage|argb32|ripc|RIP|_img|CGImage|draw" | head -80
+
       - uses: actions/upload-artifact@v4
         with:
           name: console-bench
