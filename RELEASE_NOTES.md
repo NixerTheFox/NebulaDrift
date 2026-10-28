@@ -1,6 +1,13 @@
-**Nebula Drift 1.0 is the first release, for macOS and Linux.**
+**Nebula Drift 1.1: much smoother, and an app icon on the Mac.**
 
 > This app is 100% made with AI: every line of code, the shaders and the instruments were written by AI. All the ideas behind it come directly from me.
+
+## What's new in 1.1
+
+- **Black holes are far lighter on the GPU.** Their light rays are traced for one pixel in four (one in nine on Retina-size screens) and smoothly scaled up, instead of for every pixel. A frame with a black hole close by now costs a fraction of what it did: on a Mac GPU at Retina resolution, about 14 ms instead of 80 ms.
+- **The cockpit canopy glass (G) is nearly free.** Its scratches and smudges are fixed to the ship, so they are worked out once per window size instead of every frame (34 ms down to almost nothing at Retina resolution).
+- **The instrument console uses much less CPU on the Mac** (it already did on Linux in 1.0): everything that never changes, and the glows and shadows of the moving parts, is drawn once and reused.
+- **macOS app icon**: a barred spiral galaxy rendered by the app itself.
 
 An audio visualizer: you fly through space while the music drives everything you see. Stars stream past, nebulae, gas clouds and galaxies grow from distant specks into vast clouds you fly through, beats send shockwaves across the view, and on very rare occasions you pass a black hole that bends light around it. A retro spacecraft console reacts to the sound below the view.
 

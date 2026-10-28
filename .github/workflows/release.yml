@@ -1,9 +1,15 @@
 name: Release
 
-# Push a tag like v1.0 to build both versions and publish them as a GitHub release.
+# Push a tag like v1.0, or run this workflow by hand with a version, to build both versions and publish them as
+# a GitHub release (run by hand, it creates the tag on the commit it runs on).
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag to create, like v1.1
+        required: true
 
 permissions:
   contents: write
@@ -28,7 +34,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: Nebula Drift ${{ github.ref_name }}
+          tag_name: ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Nebula Drift ${{ inputs.version || github.ref_name }}
           files: |
             dist/Nebula_Drift-x86_64.AppImage
             dist/Nebula_Drift-macOS.zip
