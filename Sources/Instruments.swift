@@ -63,7 +63,9 @@ final class InstrumentPanel {
         var scale: CGFloat
         var strip: CGRect           // the console strip, in its own coordinates
         var back: CGImage           // all that never moves
-        var front: CGImage          // unchanging parts lying over moving ones: tube cages and glass, meter shrouds...
+        /// Unchanging parts lying over moving ones, cut to where they go: the three meters (shroud and gloss),
+        /// the four tubes (cage and glass), the drum counter (gaps and curvature) and the scope (scanlines and glass).
+        var fronts: [Sprite]
         var litFaces: [Sprite]      // meter faces lit by their bulbs at full strength
         var hazedTubes: [Sprite]    // tubes filled with neon haze at full strength
         var lever: Sprite           // throttle grip with its stem and shadow, from the grip's top-left corner
@@ -867,7 +869,7 @@ final class InstrumentPanel {
             c.addLine(to: polar(pivot, R * 0.94, a))
             c.strokePath()
             // Shroud along the bottom hiding the bulb, and the glass (cached); the bulb peeks over the shroud.
-            drawFront(c, k)
+            drawFront(c, k, Front.gauge + i)
             drawSprite(c, k.bulb, at: CGPoint(x: face.midX, y: face.maxY - face.height * 0.1), alpha: b)
             c.restoreGState()
         }
@@ -895,7 +897,7 @@ final class InstrumentPanel {
                 let r = box.height * 0.045
                 drawSprite(c, k.dot, at: CGPoint(x: g.maxX - g.width * 0.13 - r, y: box.maxY - r), alpha: lit)
             }
-            drawFront(c, k) // the cage and glass in front
+            drawFront(c, k, Front.tube + i) // the cage and glass in front
             c.restoreGState()
         }
 
@@ -920,7 +922,7 @@ final class InstrumentPanel {
                           in: CGRect(x: win.minX + CGFloat(i) * dw, y: y, width: dw, height: win.height))
             }
         }
-        drawFront(c, k) // the gaps between drums and their curvature
+        drawFront(c, k, Front.drum) // the gaps between drums and their curvature
         c.restoreGState()
 
         // Fader caps.
@@ -972,7 +974,7 @@ final class InstrumentPanel {
             c.setLineWidth(max(1, 0.008 * u))
             c.strokePath()
         }
-        drawFront(c, k) // scanlines and glass
+        drawFront(c, k, Front.scope) // scanlines and glass
         if chaos > 0.02 && sin(time * 14) > -0.2 {
             c.setFillColor(rgb(0.6, 0.02, 0.02, 0.45 * CGFloat(chaos)))
             c.fill(s)
@@ -1044,9 +1046,14 @@ final class InstrumentPanel {
         drawImage(c, sprite.image, in: sprite.rect.offsetBy(dx: anchor.x, dy: anchor.y), alpha: alpha)
     }
 
-    /// Paints the front layer (within the current clip).
-    private func drawFront(_ c: CGContext, _ k: Caches) {
-        drawImage(c, k.front, in: k.strip)
+    private enum Front {
+        static let gauge = 0, tube = 3, drum = 7, scope = 8
+    }
+
+    /// Paints the piece of the front layer over one instrument. (Small pieces: Core Graphics processes a whole
+    /// image on every draw, however tightly it is clipped.)
+    private func drawFront(_ c: CGContext, _ k: Caches, _ index: Int) {
+        drawSprite(c, k.fronts[index], at: .zero)
     }
 
     private func makeCaches(_ l: Layout, viewSize: CGSize, scale: CGFloat) -> Caches? {
@@ -1185,7 +1192,18 @@ final class InstrumentPanel {
             }
         }
 
-        return Caches(size: viewSize, scale: scale, strip: strip, back: back, front: front, litFaces: litFaces,
+        // The front layer, cut into the pieces drawFront paints.
+        func piece(_ r: CGRect) -> Sprite {
+            let x0 = (r.minX * scale).rounded(.down), y0 = (r.minY * scale).rounded(.down)
+            let px = CGRect(x: x0, y: y0, width: (r.maxX * scale).rounded(.up) - x0, height: (r.maxY * scale).rounded(.up) - y0)
+            return Sprite(image: front.cropping(to: px) ?? front,
+                          rect: CGRect(x: px.minX / scale, y: px.minY / scale, width: px.width / scale, height: px.height / scale))
+        }
+        var fronts = (0..<3).map { piece(gaugeFace(l, $0).insetBy(dx: 0.025 * u, dy: 0.025 * u)) }
+        fronts += tubes.map { piece(nixieGlass($0)) }
+        fronts += [piece(counterWindow(l)), piece(scopeScreen(l))]
+
+        return Caches(size: viewSize, scale: scale, strip: strip, back: back, fronts: fronts, litFaces: litFaces,
                       hazedTubes: hazedTubes, lever: lever, cap: cap, bulb: bulb, dot: dot, digits: digits,
                       drumDigits: drumDigits, alarm: alarm)
     }
